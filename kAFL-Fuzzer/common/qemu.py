@@ -23,10 +23,30 @@ import sys
 import common.color
 import common.qemu_protocol as qemu_protocol
 from common.debug import log_qemu
+from common.debug import get_log_file
 from common.execution_result import ExecutionResult
 from fuzzer.technique.redqueen.workdir import RedqueenWorkdir
 from common.util import read_binary_file, atomic_write, print_fail, strdump
 
+def get_valid_tap(tbase, nbase=0):
+    cmd = """
+    for((i=2;i<50;i++))
+    do
+        ip link list tap-$i | grep 'state DOWN' >/dev/null 2>&1  &&  x=$i && break
+    done
+
+    if [ $i -eq 50 ]
+    then
+        echo -1
+    else
+        echo $i
+    fi
+    """
+    tap_dev = int(subprocess.check_output(cmd, shell=True, executable='/bin/bash').strip()) + nbase
+    if tap_dev > 0:
+        return tbase + str(tap_dev)
+    else:
+        return None
 
 def to_string_32(value):
     return [(value >> 24) & 0xff,
@@ -51,6 +71,7 @@ class qemu:
         self.patches_enabled = False
         self.needs_execution_for_patches = False
         self.debug_counter = 0
+        self.verbose = config.argument_values['v']
 
         self.bitmap_size = config.config_values['BITMAP_SHM_SIZE']
         self.config = config
@@ -70,6 +91,7 @@ class qemu:
         self.qemu_trace_log = self.config.argument_values['work_dir'] + "/qemu_trace_%s.log" % self.qemu_id
         self.qemu_serial_log = self.config.argument_values['work_dir'] + "/qemu_serial_%s.log" % self.qemu_id
 
+        self.in_requeen = self.config.argument_values['redqueen']
         self.redqueen_workdir = RedqueenWorkdir(self.qemu_id, config)
         self.redqueen_workdir.init_dir()
 
@@ -153,6 +175,13 @@ class qemu:
                 self.cmd = self.cmd.replace("-machine pc-q35-2.4", "-machine pc-q35-2.4 -redir tcp:5901:0.0.0.0:5900 -redir tcp:10022:0.0.0.0:22")
         else:
             self.cmd += " -machine q35 "
+            if self.config.argument_values["tp"]:
+                 self.cmd = self.cmd.replace("-net none",
+                         "-netdev tap,ifname=" + get_valid_tap("tap-", int(self.qemu_id)) + ",id=net0,script=no,downscript=no -device rtl8139,netdev=net0")
+                 self.cmd += " -device usb-tablet -machine usb=on,type=pc,accel=kvm"
+
+        if self.config.argument_values["graphic"]:
+            self.cmd = self.cmd.replace("-nographic", "")
 
         self.kafl_shm_f = None
         self.kafl_shm   = None
@@ -260,6 +289,8 @@ class qemu:
                 except:
                     log_qemu("[SEND] " + "unknown cmd '" + res + "'", self.qemu_id)
         try:
+            #debugging_code
+            log_qemu("fuzzer send: " + str(cmd), self.qemu_id)
             self.control.send(cmd)
         except (BrokenPipeError, OSError):
             if not self.exiting:
@@ -304,6 +335,8 @@ class qemu:
         while True:
             try:
                 res = self.control.recv(1)
+                #debugging_code
+                log_qemu("__debug_recv: " + str(res), self.qemu_id)
             except ConnectionResetError:
                 if self.exiting:
                     sys.exit(0)
@@ -359,7 +392,7 @@ class qemu:
                 print_fail("Slave %d: Error in debug_recv(): Got %s, Expected: %s" % (self.qemu_id, str(res), str(cmd)))
                 assert False
         if res == qemu_protocol.PT_TRASHED:
-            log_qemu("PT_TRASHED")
+            log_qemu("PT_TRASHED", self.qemu_id)
             return False
         return True
 
@@ -385,7 +418,7 @@ class qemu:
 
     def shutdown(self):
         log_qemu("Shutting down Qemu after %d execs.." % self.persistent_runs, self.qemu_id)
-        
+
         if not self.process:
             # start() has never been called, all files/shm are closed.
             return 0
@@ -470,11 +503,18 @@ class qemu:
         # Launch Qemu. stderr to stdout, stdout is logged on VM exit
         # os.setpgrp() prevents signals from being propagated to Qemu, instead allowing an
         # organized shutdown via async_exit()
-        self.process = subprocess.Popen(self.cmd,
-                preexec_fn=os.setpgrp,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT)
+        if self.verbose:
+            self.process = subprocess.Popen(self.cmd,
+                    preexec_fn=os.setpgrp,
+                    stdin=subprocess.PIPE,
+                    stdout=get_log_file(),
+                    stderr=get_log_file())
+        else:
+            self.process = subprocess.Popen(self.cmd,
+                    preexec_fn=os.setpgrp,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT)
 
         try:
             self.stat_fd = open("/proc/" + str(self.process.pid) + "/stat")
@@ -577,11 +617,15 @@ class qemu:
     # TODO: document protocol and meaning/effect of each message
     def check_recv(self, timeout_detection=True):
         if timeout_detection:
+            #debugging_code
             ready = select.select([self.control], [], [], 0.25)
+            #ready = select.select([self.control], [], [])
             if not ready[0]:
                 return 2
         else:
+            #debugging_code
             ready = select.select([self.control], [], [], 5.0)
+            #ready = select.select([self.control], [], [])
             if not ready[0]:
                 return 2
 
@@ -613,10 +657,11 @@ class qemu:
     def debug_payload(self, apply_patches=True):
 
         # TODO: do we care about this?
-        if apply_patches:
-            self.send_enable_patches()
-        else:
-            self.send_disable_patches()
+        if self.in_requeen:
+            if apply_patches:
+                self.send_enable_patches()
+            else:
+                self.send_disable_patches()
 
         self.__debug_send(qemu_protocol.RELEASE)
 
@@ -639,10 +684,11 @@ class qemu:
         self.persistent_runs += 1
         start_time = time.time()
         # TODO: added in redqueen - verify what this is doing
-        if apply_patches:
-            self.send_enable_patches()
-        else:
-            self.send_disable_patches()
+        if self.in_requeen:
+            if apply_patches:
+                self.send_enable_patches()
+            else:
+                self.send_disable_patches()
         self.__debug_send(qemu_protocol.RELEASE)
 
         self.crashed = False

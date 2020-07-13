@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.8
 #
 # Copyright (C) 2017-2019 Sergej Schumilo, Cornelius Aschermann, Tim Blazytko
 # Copyright (C) 2019-2020 Intel Corporation
@@ -74,7 +74,7 @@ class Graph:
     def __process_slave(self, slave_stats):
 
         slave = self.__read_msgpack(slave_stats)
-        
+
         self.global_tasks += 1
 
         self.global_executions += slave["total_execs"]

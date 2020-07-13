@@ -175,6 +175,10 @@ def add_args_qemu(parser):
                         action='store_true', default=False)
     parser.add_argument('-gdbserver', required=False, help='enable Qemu gdbserver (use via kafl_debug.py!)',
                         action='store_true', default=False)
+    parser.add_argument('-tp', required=False, help='some settings for tp environment',
+                        action='store_true', default=False)
+    parser.add_argument('-graphic', required=False, help='graphic mode via X11 forwarding',
+                        action='store_true', default=False)
 
 
 
@@ -336,7 +340,7 @@ class DebugConfiguration(six.with_metaclass(Singleton)):
                            '<verify>\t\trun verifcation steps\n'
 
         parser = ArgsParser(formatter_class=argparse.RawTextHelpFormatter, add_help=False)
-        
+
         general = parser.add_argument_group('General options')
         add_args_general(general)
 
@@ -344,7 +348,7 @@ class DebugConfiguration(six.with_metaclass(Singleton)):
                             help='path to input file or workdir.')
         general.add_argument('-n', metavar='<num>', help='debug iterations (default: 5)',
                             default=5, type=int)
-        general.add_argument('-action', required=False, metavar='<cmd>', choices=debug_modes, 
+        general.add_argument('-action', required=False, metavar='<cmd>', choices=debug_modes,
                             help=debug_modes_help)
 
         qemu = parser.add_argument_group('Qemu options')

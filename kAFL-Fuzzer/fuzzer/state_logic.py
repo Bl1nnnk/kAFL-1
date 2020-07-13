@@ -410,7 +410,7 @@ class FuzzingStateLogic:
 
         # Mutable payload allows faster bitwise manipulations
         payload_array = bytearray(payload)
-        
+
         default_info = {"stage": "flip_1"}
         det_info = metadata.get("afl_det_info", default_info)
 

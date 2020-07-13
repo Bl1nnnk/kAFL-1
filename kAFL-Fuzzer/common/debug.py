@@ -85,3 +85,6 @@ def log_info(msg):
 
 def log_debug(msg):
     logger("[DEBUG]\t" + msg)
+
+def get_log_file():
+    return output_file

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.8
 #
 # Copyright (C) 2017-2019 Sergej Schumilo, Cornelius Aschermann, Tim Blazytko
 # Copyright (C) 2019-2020 Intel Corporation
@@ -7,7 +7,7 @@
 
 """
 Given a AFL or kAFL workdir, process the contained corpus in
-kAFL Qemu/KVM to obtain PT traces of individual inputs.  
+kAFL Qemu/KVM to obtain PT traces of individual inputs.
 
 The individual traces are saved to $workdir/traces/.
 """
@@ -59,9 +59,9 @@ class TraceParser:
             #        bbs.add(info['edge'][1])
             # slightly faster than above line-wise json parsing
             for m in re.finditer("\{.(\w+).: \[?(\d+),?(\d+)?\]? \}", f.read().decode()):
-                if m.group(1) == "trace_enable": 
+                if m.group(1) == "trace_enable":
                     gaps.add(m.group(2))
-                if m.group(1) == "edge": 
+                if m.group(1) == "edge":
                     edges.add("%s_%s" % (m.group(2), m.group(3)))
                     bbs.add(m.group(2))
                     bbs.add(m.group(3))
@@ -70,7 +70,7 @@ class TraceParser:
     def get_cov_by_trace(self, trace_file, trace_id):
         # note the return new BB count depends on the order in which traces are parsed
         findings = self.parse_trace_file(trace_file, trace_id)
-        if not findings: 
+        if not findings:
             return 0, 0
         if len(findings['gaps']) > 1:
             print_note("Got multiple gaps in trace %s" % trace_file)
@@ -123,7 +123,7 @@ def kafl_workdir_iterator(work_dir):
             return None
         slave_stats = msgpack.unpackb(read_binary_file(stats_file), raw=False, strict_map_key=False)
         start_time = min(start_time, slave_stats['start_time'])
-    
+
     # enumerate inputs from corpus/ and match against metainfo in metadata/
     for input_file in glob.glob(work_dir + "/corpus/*/*"):
         if not input_file:
@@ -131,10 +131,10 @@ def kafl_workdir_iterator(work_dir):
         input_id = os.path.basename(input_file).replace("payload_", "")
         meta_file = work_dir + "/metadata/node_{}".format(input_id)
         metadata = msgpack.unpackb(read_binary_file(meta_file), raw=False, strict_map_key=False)
-    
+
         seconds = metadata["info"]["time"] - start_time
         nid = metadata["id"]
-    
+
         #print("%s;%d" % (input_file, timestamp))
         input_id_time.append([input_file, nid, seconds])
         #yield (input_file, nid, timestamp)
@@ -156,7 +156,7 @@ def get_inputs_by_time(data_dir):
     else:
         print_note("Unrecognized target directory type «%s». Exit." % data_dir)
         sys.exit()
-    
+
     input_data.sort(key=itemgetter(2))
     return input_data
 
@@ -281,10 +281,10 @@ def main():
     print(" Scanning target data_dir »%s«..." % data_dir )
     input_list = get_inputs_by_time(data_dir)
     trace_dir = generate_traces(config, input_list)
-    
+
     if not trace_dir:
         return -1
-    
+
     plot_bbs_from_traces(trace_dir, input_list)
 
 

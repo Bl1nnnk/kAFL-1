@@ -53,7 +53,7 @@ def start(config):
 
     if not post_self_check(config):
         return -1
-    
+
     work_dir   = config.argument_values["work_dir"]
     seed_dir   = config.argument_values["seed_dir"]
     num_slaves = config.argument_values['p']

@@ -1,11 +1,11 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.8
 #
 # Copyright (C) 2017-2019 Sergej Schumilo, Cornelius Aschermann, Tim Blazytko
 # Copyright (C) 2019-2020 Intel Corporation
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-""" 
+"""
 Execute a kAFL target once, using a special "info" binary as agent.
 
 This is used in cases where we want to automatically extract some information

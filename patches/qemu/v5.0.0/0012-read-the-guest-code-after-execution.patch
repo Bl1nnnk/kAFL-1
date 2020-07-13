@@ -1,0 +1,1613 @@
+diff --git a/include/disas/capstone.h b/include/disas/capstone.h
+index e29068d..d8fdc5d 100644
+--- a/include/disas/capstone.h
++++ b/include/disas/capstone.h
+@@ -3,7 +3,7 @@
+ 
+ #ifdef CONFIG_CAPSTONE
+ 
+-#include <capstone.h>
++#include <capstone/capstone.h>
+ 
+ #else
+ 
+diff --git a/pt.c b/pt.c
+index 1dd2692..ea5d6d9 100644
+--- a/pt.c
++++ b/pt.c
+@@ -188,7 +188,6 @@ int pt_enable_ip_filtering(CPUState *cpu, uint8_t addrn, uint64_t ip_a, uint64_t
+ int pt_enable_ip_filtering(CPUState *cpu, uint8_t addrn, uint64_t ip_a, uint64_t ip_b, bool hmp_mode){
+ #endif
+ 	int r = 0;
+-	uint8_t* buf;
+ 
+ 	if(addrn > 3){
+ 		return -1;
+@@ -207,35 +206,6 @@ int pt_enable_ip_filtering(CPUState *cpu, uint8_t addrn, uint64_t ip_a, uint64_t
+ 		pt_disable_ip_filtering(cpu, addrn, hmp_mode);
+ 	}
+ 
+-	buf = malloc(ip_b-ip_a); // TODO memory leak?
+-	if(!read_virtual_memory(ip_a, buf, ip_b-ip_a, cpu)){
+-		QEMU_PT_ERROR(PT_PREFIX, "Error (cannot dump trace region) 0x%lx-0x%lx (size: %lx)", ip_a, ip_b, (ip_b-ip_a));
+-		free(buf);
+-		return -EINVAL;
+-	}
+-
+-#ifdef CREATE_VM_IMAGE
+-	FILE* pt_file = fopen(DECODER_MEMORY_IMAGE, "wb");
+-	if (!pt_file) {
+-		QEMU_PT_ERROR(CORE_PREFIX, "Error writing file %s)", DECODER_MEMORY_IMAGE);
+-	} else {
+-		fwrite(buf, sizeof(uint8_t), ip_b-ip_a, pt_file);
+-		fclose(pt_file);
+-	}
+-
+-#ifdef CONFIG_REDQUEEN	
+-	FILE* rq_file = fopen(redqueen_workdir.target_code_dump, "wb");
+-	if (!rq_file) {
+-		QEMU_PT_ERROR(CORE_PREFIX, "Error writing RQ file %s)", redqueen_workdir.target_code_dump);
+-	} else {
+-		fwrite(&ip_a, sizeof(uint64_t), 1, rq_file);
+-		fwrite(buf, sizeof(uint8_t), ip_b-ip_a, rq_file);
+-		fclose(rq_file);
+-	}
+-#endif
+-#endif
+-
+-
+ 	QEMU_PT_DEBUG(PT_PREFIX, "Configuring new trace region (addr%d, 0x%lx-0x%lx)", addrn, ip_a, ip_b);
+ 	
+ 	switch(addrn){
+@@ -250,11 +220,11 @@ int pt_enable_ip_filtering(CPUState *cpu, uint8_t addrn, uint64_t ip_a, uint64_t
+ 			cpu->pt_ip_filter_enabled[addrn] = true;
+ #ifdef CONFIG_REDQUEEN	
+ 			if(redqueen && !cpu->redqueen_state[addrn]){
+-				cpu->redqueen_state[addrn] = new_rq_state(buf, ip_a, ip_b, cpu);
++				cpu->redqueen_state[addrn] = new_rq_state(ip_a, ip_b, cpu);
+ 			}
+-			cpu->pt_decoder_state[addrn] = pt_decoder_init(buf, ip_a, ip_b, cpu->disassembler_word_width, &pt_bitmap, cpu->redqueen_state[addrn]);
++			cpu->pt_decoder_state[addrn] = pt_decoder_init(cpu, ip_a, ip_b, cpu->disassembler_word_width, &pt_bitmap, cpu->redqueen_state[addrn]);
+ #else		
+-			cpu->pt_decoder_state[addrn] = pt_decoder_init(buf, ip_a, ip_b, cpu->disassembler_word_width, &pt_bitmap);
++			cpu->pt_decoder_state[addrn] = pt_decoder_init(cpu, ip_a, ip_b, cpu->disassembler_word_width, &pt_bitmap);
+ #endif
+ 			break;
+ 		default:
+@@ -319,7 +289,7 @@ void pt_kvm_init(CPUState *cpu){
+ #endif
+    	// setting the target's word with is critical to RQ operation
+ 	// Initialize as invalid, set by submit_CR3 or submit_mode hypercalls
+-	cpu->disassembler_word_width = 0;
++	cpu->disassembler_word_width = TARGET_LONG_BITS;
+ 
+ 	cpu->pt_c3_filter = 0;
+ 	cpu->pt_target_file = NULL;
+@@ -328,6 +298,7 @@ void pt_kvm_init(CPUState *cpu){
+ 	cpu->reload_pending = false;
+ 	cpu->executing = false;
+ 	cpu->intel_pt_run_trashed = false;
++
+ }
+ 
+ struct vmx_pt_filter_iprs {
+@@ -448,7 +419,7 @@ void pt_handle_overflow(CPUState *cpu){
+ 	//printf("%s\n", __func__);
+ 	int overflow = ioctl(cpu->pt_fd, KVM_VMX_PT_CHECK_TOPA_OVERFLOW, (unsigned long)0);
+ 	if (overflow > 0){
+-			cpu->overflow_counter++;
++		cpu->overflow_counter++;
+ 		pt_dump(cpu, overflow);
+ 	}  
+ 
+diff --git a/pt/asm_decoder.c b/pt/asm_decoder.c
+index c5721a5..59167af 100644
+--- a/pt/asm_decoder.c
++++ b/pt/asm_decoder.c
+@@ -28,39 +28,39 @@ static regex_t* op_regex_mem=NULL;
+ static regex_t* op_regex_mem_const=NULL;
+ 
+ void asm_decoder_compile(void){
+-    //const char *begin,*end;
+-		const char *integer = "(0x[a-f0-9]+|[0-9]+)";
+-		const char *reg = "(r[abcd]x|r[isb]p|r[sd]i|r[89]|r1[012345]|"
+-		"e[abcd]x|e[isb]p|e[sd]i|r[89]d|r1[012345]d|"
+-		"[abcd]x|[isb]p|[sd]i|r[89]w|r1[012345]w|"
+-		"[abcd]l|[sb]pl|[sd]il|r[89]b|r1[012345]b|"
+-		"[abcd]h|[sb]ph|[sd]ih|xmm[0-7])";
+-
+-		const char *ptr= "(byte ptr|word ptr|dword ptr|qword ptr|xmmword ptr)";
+-		const char *segreg = "(ss|fs|ds|gs|cs|es)";
+-		const char *scale ="(1|2|4|8)";
+-
+-		char *str_displace = NULL;
+-		char *str_displace_const = NULL;
+-		const char* str_const = "^(-)?(0x[a-f0-9]+|[0-9]+)$";
+-		char *str_reg = NULL;
+-		assert(-1 != asprintf(&str_displace,  "^%s (%s:)?\\[(%s ([+\\-]) )?%s(\\*%s)?( ([+\\-]) %s)?\\]$",ptr, segreg, reg, reg, scale, integer));
+-		assert(-1 != asprintf(&str_displace_const, "^%s (%s:)?\\[%s\\]$", ptr, segreg, integer));
+-		assert(-1 != asprintf(&str_reg, "^%s$", reg ));
+-
+-		op_regex_reg = malloc(sizeof(regex_t));
+-		op_regex_const = malloc(sizeof(regex_t));
+-		op_regex_mem_const = malloc(sizeof(regex_t));
+-		op_regex_mem = malloc(sizeof(regex_t));
+-
+-		assert(!regcomp(op_regex_reg, str_reg, REG_EXTENDED));
+-		assert(!regcomp(op_regex_const, str_const, REG_EXTENDED));
+-		assert(!regcomp(op_regex_mem, str_displace, REG_EXTENDED));
+-		assert(!regcomp(op_regex_mem_const, str_displace_const, REG_EXTENDED));
+-
+-		free(str_reg);
+-		free(str_displace);
+-		free(str_displace_const);
++	//const char *begin,*end;
++	const char *integer = "(0x[a-f0-9]+|[0-9]+)";
++	const char *reg = "(r[abcd]x|r[isb]p|r[sd]i|r[89]|r1[012345]|"
++	"e[abcd]x|e[isb]p|e[sd]i|r[89]d|r1[012345]d|"
++	"[abcd]x|[isb]p|[sd]i|r[89]w|r1[012345]w|"
++	"[abcd]l|[sb]pl|[sd]il|r[89]b|r1[012345]b|"
++	"[abcd]h|[sb]ph|[sd]ih|xmm[0-7])";
++
++	const char *ptr= "(byte ptr|word ptr|dword ptr|qword ptr|xmmword ptr)";
++	const char *segreg = "(ss|fs|ds|gs|cs|es)";
++	const char *scale ="(1|2|4|8)";
++
++	char *str_displace = NULL;
++	char *str_displace_const = NULL;
++	const char* str_const = "^(-)?(0x[a-f0-9]+|[0-9]+)$";
++	char *str_reg = NULL;
++	assert(-1 != asprintf(&str_displace,  "^%s (%s:)?\\[(%s ([+\\-]) )?%s(\\*%s)?( ([+\\-]) %s)?\\]$",ptr, segreg, reg, reg, scale, integer));
++	assert(-1 != asprintf(&str_displace_const, "^%s (%s:)?\\[%s\\]$", ptr, segreg, integer));
++	assert(-1 != asprintf(&str_reg, "^%s$", reg ));
++
++	op_regex_reg = malloc(sizeof(regex_t));
++	op_regex_const = malloc(sizeof(regex_t));
++	op_regex_mem_const = malloc(sizeof(regex_t));
++	op_regex_mem = malloc(sizeof(regex_t));
++
++	assert(!regcomp(op_regex_reg, str_reg, REG_EXTENDED));
++	assert(!regcomp(op_regex_const, str_const, REG_EXTENDED));
++	assert(!regcomp(op_regex_mem, str_displace, REG_EXTENDED));
++	assert(!regcomp(op_regex_mem_const, str_displace_const, REG_EXTENDED));
++
++	free(str_reg);
++	free(str_displace);
++	free(str_displace_const);
+ }
+ 
+ void asm_decoder_print_op(asm_operand_t* op){
+@@ -193,34 +193,34 @@ bool asm_decoder_is_imm(asm_operand_t* op){
+ /*
+ int main(int argc, char* argv[])
+ {
+-		char* tests[] = {
+-		"byte ptr [0x24ac8057a55c8dbd]",
+-		"al",
+-		"0x123",
+-		"byte ptr [rcx + rbp*2]",
+-		"dword ptr fs:[rax]",
+-		"byte ptr ds:[0x23]",
+-		"byte ptr [rbx - 0x51419c2c]",
+-		"dword ptr [rdx + rbp*2 - 0x74]",
+-		"dword ptr [rcx + rbx*4]",
+-		"dword ptr [rbp + 0x46]",
+-		"qword ptr [rip - 0x4fb843b2]",
+-		"byte ptr [rdi]",
+-		"-0x1ba6",
+-		"byte ptr ss:[rdi]",
+-		"byte ptr [rdi*4]",
+-		"byte ptr [rdi*4 + 0x123]",
+-		NULL};
+-
+-		compile();
+-		for(int i = 0; tests[i]; i++){
+-			asm_operand_t op = {0};
+-			printf("\n");
+-			parse_op(tests[i], &op);
+-			print_op(&op);
+-		}
++	char* tests[] = {
++	"byte ptr [0x24ac8057a55c8dbd]",
++	"al",
++	"0x123",
++	"byte ptr [rcx + rbp*2]",
++	"dword ptr fs:[rax]",
++	"byte ptr ds:[0x23]",
++	"byte ptr [rbx - 0x51419c2c]",
++	"dword ptr [rdx + rbp*2 - 0x74]",
++	"dword ptr [rcx + rbx*4]",
++	"dword ptr [rbp + 0x46]",
++	"qword ptr [rip - 0x4fb843b2]",
++	"byte ptr [rdi]",
++	"-0x1ba6",
++	"byte ptr ss:[rdi]",
++	"byte ptr [rdi*4]",
++	"byte ptr [rdi*4 + 0x123]",
++	NULL};
++
++	compile();
++	for(int i = 0; tests[i]; i++){
++		asm_operand_t op = {0};
++		printf("\n");
++		parse_op(tests[i], &op);
++		print_op(&op);
++	}
+ 
+ 
+-    return 0;
++	return 0;
+ }
+ */
+diff --git a/pt/decoder.c b/pt/decoder.c
+index 304b356..6cc7090 100644
+--- a/pt/decoder.c
++++ b/pt/decoder.c
+@@ -150,12 +150,11 @@ static void flush_log(decoder_t* self){
+ #endif
+ 
+ #ifdef CONFIG_REDQUEEN
+-decoder_t* pt_decoder_init(uint8_t* code, uint64_t min_addr, uint64_t max_addr, int disassembler_word_width, void (*handler)(uint64_t), redqueen_t *redqueen_state){
++decoder_t* pt_decoder_init(CPUState *cpu, uint64_t min_addr, uint64_t max_addr, int disassembler_word_width, void (*handler)(uint64_t), redqueen_t *redqueen_state){
+ #else
+-decoder_t* pt_decoder_init(uint8_t* code, uint64_t min_addr, uint64_t max_addr, int disassembler_word_width, void (*handler)(uint64_t)){
++decoder_t* pt_decoder_init(CPUState *cpu, uint64_t min_addr, uint64_t max_addr, int disassembler_word_width, void (*handler)(uint64_t)){
+ #endif
+ 	decoder_t* res = malloc(sizeof(decoder_t));
+-	res->code = code;
+ 	res->min_addr = min_addr;
+ 	res->max_addr = max_addr;
+ 	res->handler = handler;
+@@ -167,9 +166,9 @@ decoder_t* pt_decoder_init(uint8_t* code, uint64_t min_addr, uint64_t max_addr,
+ 	flush_log(res);
+ #endif
+ #ifdef CONFIG_REDQUEEN
+-	res->disassembler_state = init_disassembler(code, min_addr, max_addr, disassembler_word_width, handler, redqueen_state);	
++	res->disassembler_state = init_disassembler(cpu, min_addr, max_addr, disassembler_word_width, handler, redqueen_state);	
+ #else
+-	res->disassembler_state = init_disassembler(code, min_addr, max_addr, disassembler_word_width, handler);
++	res->disassembler_state = init_disassembler(cpu, min_addr, max_addr, disassembler_word_width, handler);
+ #endif
+ 	res->tnt_cache_state = tnt_cache_init();
+ 		/* ToDo: Free! */
+@@ -352,8 +351,8 @@ static inline uint64_t get_val(uint8_t **pp, uint8_t len){
+ static inline void disasm(decoder_t* self){
+ 	should_disasm_t* res = self->decoder_state_result;
+ 	if(res->valid){
+-    	WRITE_SAMPLE_DECODED_DETAILED("\n\ndisasm(%lx,%lx)\tTNT: %ld\n", res->start, res->end, count_tnt(self->tnt_cache_state));
+-  		trace_disassembler(self->disassembler_state, res->start, res->end, self->tnt_cache_state);
++		WRITE_SAMPLE_DECODED_DETAILED("\n\ndisasm(%lx,%lx)\tTNT: %ld\n", res->start, res->end, count_tnt(self->tnt_cache_state));
++		trace_disassembler(self->disassembler_state, res->start, res->end, self->tnt_cache_state);
+ 	}
+ }
+ 
+@@ -386,7 +385,7 @@ static void tip_pge_handler(decoder_t* self, uint8_t** p, uint8_t** end){
+ 	disasm(self);
+ #ifdef CONFIG_REDQUEEN
+ 	if(self->disassembler_state->redqueen_mode){
+-    disassembler_flush(self->disassembler_state);
++	disassembler_flush(self->disassembler_state);
+ 		redqueen_trace_enabled(self->disassembler_state->redqueen_state, self->last_tip);
+ 	}
+ #endif
+@@ -409,9 +408,9 @@ static void tip_pgd_handler(decoder_t* self, uint8_t** p, uint8_t** end){
+ 
+ #ifdef CONFIG_REDQUEEN
+ 	if(self->disassembler_state->redqueen_mode){
+-      disassembler_flush(self->disassembler_state);
+-    		redqueen_trace_disabled(self->disassembler_state->redqueen_state, self->last_tip);
+-  	}
++	disassembler_flush(self->disassembler_state);
++		redqueen_trace_disabled(self->disassembler_state->redqueen_state, self->last_tip);
++	}
+ #endif
+ #ifdef DECODER_LOG
+ 	self->log.tip_pgd++;
+diff --git a/pt/decoder.h b/pt/decoder.h
+index 0067252..380eb74 100644
+--- a/pt/decoder.h
++++ b/pt/decoder.h
+@@ -53,7 +53,6 @@ typedef struct ShouldDisasm{
+ 
+ 
+ typedef struct decoder_s{
+-	uint8_t* code;
+ 	uint64_t min_addr;
+ 	uint64_t max_addr;
+ 	void (*handler)(uint64_t);
+@@ -88,9 +87,9 @@ typedef struct decoder_s{
+ #endif
+ } decoder_t;
+ #ifdef CONFIG_REDQUEEN
+-decoder_t* pt_decoder_init(uint8_t* code, uint64_t min_addr, uint64_t max_addr, int disassembler_word_with,  void (*handler)(uint64_t), redqueen_t *redqueen_state);
++decoder_t* pt_decoder_init(CPUState *cpu, uint64_t min_addr, uint64_t max_addr, int disassembler_word_with,  void (*handler)(uint64_t), redqueen_t *redqueen_state);
+ #else
+-decoder_t* pt_decoder_init(uint8_t* code, uint64_t min_addr, uint64_t max_addr, int disassembler_word_with, void (*handler)(uint64_t));
++decoder_t* pt_decoder_init(CPUState *cpu, uint64_t min_addr, uint64_t max_addr, int disassembler_word_with, void (*handler)(uint64_t));
+ #endif
+ /* returns false if the CPU trashed our tracing run ... thank you Intel btw ... */
+  __attribute__((hot)) bool decode_buffer(decoder_t* self, uint8_t* map, size_t len);
+diff --git a/pt/disassembler.c b/pt/disassembler.c
+index 22c9a8b..96d0d8d 100644
+--- a/pt/disassembler.c
++++ b/pt/disassembler.c
+@@ -11,6 +11,7 @@
+ #include "debug.h"
+ #include "pt/disassembler.h"
+ #include "qemu/log.h"
++#include "pt/memory_access.h"
+ #ifdef CONFIG_REDQUEEN
+ #include "pt/redqueen.h"
+ #endif
+@@ -21,7 +22,7 @@
+ #define MODRM_REG(x)		(x << 3)
+ #define MODRM_AND			0b00111000
+ 
+-#define limit_check(a, b, c) (!((c >= a) & (c <= b)))
++#define limit_check(a, b, c) (!((c >= a) & (c <= b))) // c < a || c > b ?
+ #define out_of_bounds(self, addr) ((addr < self->min_addr) | (addr > self->max_addr))
+ 
+ #define FAST_ARRAY_LOOKUP
+@@ -38,17 +39,17 @@ cofi_ins cb_lookup[] = {
+ 	{X86_INS_JECXZ,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
+ 	{X86_INS_JE,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
+ 	{X86_INS_JGE,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
+-    {X86_INS_JG,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
+-    {X86_INS_JLE,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
+-    {X86_INS_JL,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
+-    {X86_INS_JNE,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
+-    {X86_INS_JNO,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
+-    {X86_INS_JNP,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
+-    {X86_INS_JNS,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
+-    {X86_INS_JO,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
+-    {X86_INS_JP,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
+-    {X86_INS_JRCXZ,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
+-    {X86_INS_JS,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
++	{X86_INS_JG,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
++	{X86_INS_JLE,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
++	{X86_INS_JL,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
++	{X86_INS_JNE,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
++	{X86_INS_JNO,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
++	{X86_INS_JNP,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
++	{X86_INS_JNS,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
++	{X86_INS_JO,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
++	{X86_INS_JP,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
++	{X86_INS_JRCXZ,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
++	{X86_INS_JS,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
+ 	{X86_INS_LOOP,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
+ 	{X86_INS_LOOPE,		IGN_MOD_RM,	IGN_OPODE_PREFIX},
+ 	{X86_INS_LOOPNE,	IGN_MOD_RM,	IGN_OPODE_PREFIX},
+@@ -187,10 +188,6 @@ static void map_put(disassembler_t* self, uint64_t addr, uint64_t ref){
+ 	lookup_area[self->max_addr-addr] = ref;
+ }
+ 
+-static int map_exist(disassembler_t* self, uint64_t addr){
+-	return !!(lookup_area[self->max_addr-addr]);
+-}
+-
+ static int map_get(disassembler_t* self, uint64_t addr, uint64_t* ref){
+ 	*ref = lookup_area[self->max_addr-addr];
+ 	return !(*ref);
+@@ -205,15 +202,6 @@ static void map_put(disassembler_t* self, uint64_t addr, uint64_t ref){
+ 	kh_value(self->map, k) = ref;
+ }
+ 
+-static int map_exist(disassembler_t* self, uint64_t addr){
+-	khiter_t k;
+-	k = kh_get(ADDR0, self->map, addr); 
+-	if(k != kh_end(self->map)){
+-		return 1;
+-	}
+-	return 0;
+-}
+-
+ static int map_get(disassembler_t* self, uint64_t addr, uint64_t* ref){
+ 	khiter_t k;
+ 	k = kh_get(ADDR0, self->map, addr); 
+@@ -244,79 +232,79 @@ static inline uint64_t hex_to_bin(char* str){
+ 
+ #ifdef CONFIG_REDQUEEN
+ static bool is_interessting_lea_at(disassembler_t* self, uint64_t addr){
+-  asm_operand_t op1 = {0};
+-  asm_operand_t op2 = {0};
+-  bool res = false;
+-  if( redqueen_get_operands_at(self->redqueen_state, addr, &op1, &op2) ) {
+-    assert(op1.was_present && op2.was_present);
+-    assert(op2.ptr_size);
+-
+-    int64_t oint = (int64_t)op2.offset;
+-    res = oint < 0 && (-oint) > 0xff && op2.scale == 1 && op2.base == NULL && op2.index != NULL;
+-
+-    if(res){
+-      if(!strcmp(op2.index,"rbp") || !strcmp(op2.index,"ebp") || !strcmp(op2.index,"rip")){ 
+-        QEMU_PT_PRINTF(REDQUEEN_PREFIX, "got boring index");
+-        res = false;
+-      } //don't instrument local stack offset computations
+-    }
+-    asm_decoder_clear(&op1);
+-    asm_decoder_clear(&op2);
+-  }
+-  return res;
++	asm_operand_t op1 = {0};
++	asm_operand_t op2 = {0};
++	bool res = false;
++	if( redqueen_get_operands_at(self->redqueen_state, addr, &op1, &op2) ) {
++		assert(op1.was_present && op2.was_present);
++		assert(op2.ptr_size);
++	
++		int64_t oint = (int64_t)op2.offset;
++		res = oint < 0 && (-oint) > 0xff && op2.scale == 1 && op2.base == NULL && op2.index != NULL;
++	
++		if(res){
++			if(!strcmp(op2.index,"rbp") || !strcmp(op2.index,"ebp") || !strcmp(op2.index,"rip")){ 
++				QEMU_PT_PRINTF(REDQUEEN_PREFIX, "got boring index");
++				res = false;
++			} //don't instrument local stack offset computations
++		}
++		asm_decoder_clear(&op1);
++		asm_decoder_clear(&op2);
++	}
++	return res;
+ }
+ 
+ static bool is_interessting_add_at(disassembler_t* self, uint64_t addr){
+-  asm_operand_t op1 = {0};
+-  asm_operand_t op2 = {0};
+-  bool res = false;
+-  if( redqueen_get_operands_at(self->redqueen_state, addr, &op1, &op2) ) {
+-    assert(op1.was_present && op2.was_present);
+-
+-    //offsets needs to be negative, < -0xff to ensure we only look at multi byte substractions
+-    res = op2.offset > 0x7fff && (((op2.offset>>8)&0xff) != 0xff) && op2.scale == 1 && op2.base == NULL && op2.index == NULL;
+-
+-    if( (op1.index && strstr(op1.index,"bp")) || (op2.index && strstr(op2.index,"sp") ) ){
+-      res = false;
+-    } //don't instrument local stack offset computations
+-    asm_decoder_clear(&op1);
+-    asm_decoder_clear(&op2);
+-  }
+-  return res;
++	asm_operand_t op1 = {0};
++	asm_operand_t op2 = {0};
++	bool res = false;
++	if( redqueen_get_operands_at(self->redqueen_state, addr, &op1, &op2) ) {
++		assert(op1.was_present && op2.was_present);
++
++		//offsets needs to be negative, < -0xff to ensure we only look at multi byte substractions
++		res = op2.offset > 0x7fff && (((op2.offset>>8)&0xff) != 0xff) && op2.scale == 1 && op2.base == NULL && op2.index == NULL;
++
++		if( (op1.index && strstr(op1.index,"bp")) || (op2.index && strstr(op2.index,"sp") ) ){
++			res = false;
++		} //don't instrument local stack offset computations
++		asm_decoder_clear(&op1);
++		asm_decoder_clear(&op2);
++	}
++	return res;
+ }
+ 
+ static bool is_interessting_sub_at(disassembler_t* self, uint64_t addr){
+-  asm_operand_t op1 = {0};
+-  asm_operand_t op2 = {0};
+-  bool res = false;
+-  if( redqueen_get_operands_at(self->redqueen_state, addr, &op1, &op2) ) {
+-    assert(op1.was_present && op2.was_present);
+-    res = false;
+-    if(op2.offset > 0xff && op2.scale == 1 && op2.base == NULL && op2.index == NULL){
+-      if( (op1.index && strstr(op1.index,"bp")) || (op2.index && strstr(op2.index,"sp") ) ){
+-        res = false;
+-      } //don't instrument local stack offset computations
+-      else{
+-        res = true;
+-      }
+-    }
+-    asm_decoder_clear(&op1);
+-    asm_decoder_clear(&op2);
+-  }
+-  return res;
++	asm_operand_t op1 = {0};
++	asm_operand_t op2 = {0};
++	bool res = false;
++	if( redqueen_get_operands_at(self->redqueen_state, addr, &op1, &op2) ) {
++		assert(op1.was_present && op2.was_present);
++		res = false;
++		if(op2.offset > 0xff && op2.scale == 1 && op2.base == NULL && op2.index == NULL){
++			if( (op1.index && strstr(op1.index,"bp")) || (op2.index && strstr(op2.index,"sp") ) ){
++				res = false;
++			} else {
++				//don't instrument local stack offset computations 
++				res = true;
++			}
++		}
++		asm_decoder_clear(&op1);
++		asm_decoder_clear(&op2);
++	}
++	return res;
+ }
+ 
+ static bool is_interessting_xor_at(disassembler_t* self, uint64_t addr){
+-  asm_operand_t op1 = {0};
+-  asm_operand_t op2 = {0};
+-  bool res = false;
+-  if( redqueen_get_operands_at(self->redqueen_state, addr, &op1, &op2) ) {
+-    assert(op1.was_present && op2.was_present);
+-    res = !asm_decoder_op_eql(&op1, &op2);
+-  }
+-  asm_decoder_clear(&op1);
+-  asm_decoder_clear(&op2);
+-  return res;
++	asm_operand_t op1 = {0};
++	asm_operand_t op2 = {0};
++	bool res = false;
++	if( redqueen_get_operands_at(self->redqueen_state, addr, &op1, &op2) ) {
++		assert(op1.was_present && op2.was_present);
++		res = !asm_decoder_op_eql(&op1, &op2);
++	}
++	asm_decoder_clear(&op1);
++	asm_decoder_clear(&op2);
++	return res;
+ }
+ #endif
+ 
+@@ -327,35 +315,35 @@ static cofi_type opcode_analyzer(disassembler_t* self, cs_insn *ins){
+ 	if(self->redqueen_mode){
+ 		  if(ins->id == X86_INS_CMP){
+ 			  set_rq_instruction(self->redqueen_state, ins->address);
+-      }
+-		  if(ins->id == X86_INS_LEA && is_interessting_lea_at(self, ins->address)){
+-		      QEMU_PT_PRINTF(REDQUEEN_PREFIX, "hooking lea %lx", ins->address);
+-			    set_rq_instruction(self->redqueen_state, ins->address);
+-      }
+-		  if(ins->id == X86_INS_SUB && is_interessting_sub_at(self, ins->address)){
+-		      QEMU_PT_PRINTF(REDQUEEN_PREFIX, "hooking sub %lx", ins->address);
+-			    set_rq_instruction(self->redqueen_state, ins->address);
+-      }
+-		  if(ins->id == X86_INS_ADD && is_interessting_add_at(self, ins->address)){
+-		      QEMU_PT_PRINTF(REDQUEEN_PREFIX, "hooking add %lx", ins->address);
+-			    set_rq_instruction(self->redqueen_state, ins->address);
+-      }
+-		  if(ins->id == X86_INS_XOR && is_interessting_xor_at(self, ins->address)){
+-		      QEMU_PT_PRINTF(REDQUEEN_PREFIX, "hooking xor %lx", ins->address);
+-			    set_rq_instruction(self->redqueen_state, ins->address);
+-      }
+-      if( ins->id != X86_INS_LEA && (ins->id == X86_INS_RET || ins->id == X86_INS_POP || 
+-          (strstr(ins->op_str,"[") && 
+-          (ins->id != X86_INS_NOP)	&& 
+-          !(ins->size == 2 && 
+-          ins->bytes[0] == 0x00 && 
+-          ins->bytes[1] == 0x00)))){ /* ignore "add	byte ptr [rax], al" [0000] */
+-			  set_se_instruction(self->redqueen_state, ins->address);
+-		  }
+-      if(ins->id ==X86_INS_CALL || ins->id == X86_INS_LCALL){
+-		  QEMU_PT_DEBUG(REDQUEEN_PREFIX, "insert hook call %lx", ins->address);
+-		  set_rq_instruction(self->redqueen_state, ins->address);
+-      }
++		}
++		if(ins->id == X86_INS_LEA && is_interessting_lea_at(self, ins->address)){
++			QEMU_PT_PRINTF(REDQUEEN_PREFIX, "hooking lea %lx", ins->address);
++			set_rq_instruction(self->redqueen_state, ins->address);
++		}
++		if(ins->id == X86_INS_SUB && is_interessting_sub_at(self, ins->address)){
++			QEMU_PT_PRINTF(REDQUEEN_PREFIX, "hooking sub %lx", ins->address);
++			set_rq_instruction(self->redqueen_state, ins->address);
++		}
++		if(ins->id == X86_INS_ADD && is_interessting_add_at(self, ins->address)){
++			QEMU_PT_PRINTF(REDQUEEN_PREFIX, "hooking add %lx", ins->address);
++			set_rq_instruction(self->redqueen_state, ins->address);
++		}
++		if(ins->id == X86_INS_XOR && is_interessting_xor_at(self, ins->address)){
++			QEMU_PT_PRINTF(REDQUEEN_PREFIX, "hooking xor %lx", ins->address);
++			set_rq_instruction(self->redqueen_state, ins->address);
++		}
++		if( ins->id != X86_INS_LEA && (ins->id == X86_INS_RET || ins->id == X86_INS_POP || 
++			(strstr(ins->op_str,"[") && 
++			(ins->id != X86_INS_NOP) &&
++			!(ins->size == 2 && 
++			ins->bytes[0] == 0x00 && 
++			ins->bytes[1] == 0x00)))){ /* ignore "add	byte ptr [rax], al" [0000] */
++				set_se_instruction(self->redqueen_state, ins->address);
++			}
++		if(ins->id ==X86_INS_CALL || ins->id == X86_INS_LCALL){
++			QEMU_PT_DEBUG(REDQUEEN_PREFIX, "insert hook call %lx", ins->address);
++			set_rq_instruction(self->redqueen_state, ins->address);
++		}
+ 	}
+ #endif
+ 	
+@@ -394,21 +382,22 @@ int get_capstone_mode(int word_width_in_bits){
+ 	}
+ }
+ 
+-static cofi_list* analyse_assembly(disassembler_t* self, uint64_t base_address){
++static cofi_list* analyse_assembly(disassembler_t* self, uint64_t base_address, bool across_page){
+ 	csh handle;
+ 	cs_insn *insn;
+ 	cofi_type type;
+-  //cofi_header* tmp = NULL;
++	//cofi_header* tmp = NULL;
+ 	uint64_t tmp_list_element = 0;
+-	bool last_nop = false;
++	bool last_nop = false, no_munmap = true;
+ 	uint64_t total = 0;
+ 	uint64_t cofi = 0;
+-	const uint8_t* code = self->code + (base_address-self->min_addr);
+-	size_t code_size = (self->max_addr-base_address);
++	const uint8_t* code = mmap_virtual_memory(base_address, self->cpu);
++	uint8_t tmp_code[x86_64_PAGE_SIZE*2];
++	size_t code_size = x86_64_PAGE_SIZE - (base_address & ~x86_64_PAGE_MASK);;
+ 	uint64_t address = base_address;
+ 	cofi_list* predecessor = NULL;
+ 	cofi_list* first = NULL;
+-  	bool abort_disassembly = false;
++	//bool abort_disassembly = false;
+ 				
+ 	if (cs_open(CS_ARCH_X86, get_capstone_mode(self->word_width), &handle) != CS_ERR_OK)
+ 		return NULL;
+@@ -416,6 +405,25 @@ static cofi_list* analyse_assembly(disassembler_t* self, uint64_t base_address){
+ 	cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
+ 	insn = cs_malloc(handle);
+ 	
++	if (!code) {
++		printf("Fatal error 1 in analyse_assembly.\n");
++		asm("int $3\r\n");
++	}
++
++	if (across_page) {
++		/*
++		 * We must parse instructions in two consecutive pages.
++		 * */
++		code_size = x86_64_PAGE_SIZE*2 - (address & ~x86_64_PAGE_MASK);
++		if (!read_virtual_memory(address, tmp_code, code_size, self->cpu)) {
++			printf("Fatal error 2 in analyse_assembly.\n");
++			asm("int $3\r\n");
++		}
++		munmap_virtual_memory((void *)code, self->cpu);
++		no_munmap = false;
++		code = tmp_code;
++	}
++
+ 	while(cs_disasm_iter(handle, &code, &code_size, &address, insn)) {	
+ 		if (insn->address > self->max_addr){
+ 			break;
+@@ -429,8 +437,6 @@ static cofi_list* analyse_assembly(disassembler_t* self, uint64_t base_address){
+ 		//}
+ 		
+ 		if (!last_nop){
+-			
+-	
+ 			edit_cofi_ptr(predecessor, self->list_element);
+ 			predecessor = self->list_element;
+ 			self->list_element = new_list_element(self->list_element);
+@@ -438,29 +444,17 @@ static cofi_list* analyse_assembly(disassembler_t* self, uint64_t base_address){
+ 			//tmp = malloc(sizeof(cofi_header));
+ 			self->list_element->cofi.type = NO_COFI_TYPE;
+ 			self->list_element->cofi.ins_addr = insn->address;
+-      		self->list_element->cofi.ins_size = insn->size;
++			self->list_element->cofi.ins_size = insn->size;
+ 			self->list_element->cofi.target_addr = 0;
+ 		}
+ 		
+-		if (map_exist(self, insn->address)){
+-			//if(tmp){
+-				map_get(self, insn->address, &tmp_list_element);
+-				edit_cofi_ptr(self->list_element, (cofi_list*)tmp_list_element);
+-
+-				
+-		
+-				edit_cofi_ptr(predecessor, self->list_element);
+-				predecessor = self->list_element;
+-				self->list_element = new_list_element(self->list_element);
+-
+-				//tmp = malloc(sizeof(cofi_header));
+-				self->list_element->cofi.type = NO_COFI_TYPE;
+-				self->list_element->cofi.ins_addr = insn->address;
+-				self->list_element->cofi.target_addr = insn->size;
+-				self->list_element->cofi.target_addr = 0;
+-			//}
+-
+-			break;
++		if (!map_get(self, insn->address, (uint64_t *)&tmp_list_element)){
++			if(((cofi_list *)tmp_list_element)->cofi_ptr){
++				edit_cofi_ptr(self->list_element, (cofi_list *)tmp_list_element);
++				break;
++			} else {
++				self->list_element = (cofi_list *)tmp_list_element;
++			}
+ 		}
+ 		
+ 		if (type != NO_COFI_TYPE){
+@@ -476,12 +470,12 @@ static cofi_list* analyse_assembly(disassembler_t* self, uint64_t base_address){
+ 			}
+ 			//self->list_element->cofi = tmp;
+ 			map_put(self, self->list_element->cofi.ins_addr, (uint64_t)(self->list_element));
+-			if(type == COFI_TYPE_INDIRECT_BRANCH || type == COFI_TYPE_NEAR_RET || type == COFI_TYPE_FAR_TRANSFERS){
+-				//don't disassembly through ret and similar instructions to avoid disassembly inline data
+-				//however we need to finish the cofi ptr datatstructure therefore we take a second loop iteration and abort
+-				//after last_nop = false ist handeled
+-				abort_disassembly = true;
+-			}
++			//if(type == COFI_TYPE_INDIRECT_BRANCH || type == COFI_TYPE_NEAR_RET || type == COFI_TYPE_FAR_TRANSFERS){
++			//	//don't disassembly through ret and similar instructions to avoid disassembly inline data
++			//	//however we need to finish the cofi ptr datatstructure therefore we take a second loop iteration and abort
++			//	//after last_nop = false ist handeled
++			//	abort_disassembly = true;
++			//}
+ 		} else {
+ 			last_nop = true;
+ 			map_put(self, insn->address, (uint64_t)(self->list_element));
+@@ -491,22 +485,25 @@ static cofi_list* analyse_assembly(disassembler_t* self, uint64_t base_address){
+ 			first = self->list_element;
+ 		}
+ 
+-		if (abort_disassembly){
+-			break;
+-		}
++		//if (abort_disassembly){
++		//	break;
++		//}
+ 	}
+ 	
+ 	cs_free(insn, 1);
+ 	cs_close(&handle);
++	if (no_munmap) {
++		munmap_virtual_memory((void *)code, self->cpu);
++	}
+ 	return first;
+ }
+ #ifdef CONFIG_REDQUEEN
+-disassembler_t* init_disassembler(uint8_t* code, uint64_t min_addr, uint64_t max_addr, int disassembler_word_width, void (*handler)(uint64_t), redqueen_t *redqueen_state){
++disassembler_t* init_disassembler(CPUState *cpu, uint64_t min_addr, uint64_t max_addr, int disassembler_word_width, void (*handler)(uint64_t), redqueen_t *redqueen_state){
+ #else
+-disassembler_t* init_disassembler(uint8_t* code, uint64_t min_addr, uint64_t max_addr, int disassembler_word_width, void (*handler)(uint64_t)){
++disassembler_t* init_disassembler(CPUState *cpu, uint64_t min_addr, uint64_t max_addr, int disassembler_word_width, void (*handler)(uint64_t)){
+ #endif
+ 	disassembler_t* res = malloc(sizeof(disassembler_t));
+-	res->code = code;
++	res->cpu = cpu;
+ 	res->min_addr = min_addr;
+ 	res->max_addr = max_addr;
+ 	res->handler = handler;
+@@ -515,13 +512,13 @@ disassembler_t* init_disassembler(uint8_t* code, uint64_t min_addr, uint64_t max
+ 	res->list_head = create_list_head();
+ 	res->word_width = disassembler_word_width;
+ 	res->list_element = res->list_head;
+-  	res->has_pending_indirect_branch = false;
+-  	res->pending_indirect_branch_src = 0;
++	res->has_pending_indirect_branch = false;
++	res->pending_indirect_branch_src = 0;
+ 
+ #ifdef FAST_ARRAY_LOOKUP
+-  	assert((max_addr-min_addr) <= (128 << 20)); /* up to 128MB trace region (results in 512MB lookup table...) */
+-  	lookup_area = malloc(sizeof(uint64_t) * (max_addr-min_addr));
+-  	memset(lookup_area, 0x00, (sizeof(uint64_t) * (max_addr-min_addr)));
++	assert((max_addr-min_addr) <= (128 << 20)); /* up to 128MB trace region (results in 512MB lookup table...) */
++	lookup_area = malloc(sizeof(uint64_t) * (max_addr-min_addr));
++	memset(lookup_area, 0x00, (sizeof(uint64_t) * (max_addr-min_addr)));
+ #endif
+ 
+ #ifdef CONFIG_REDQUEEN
+@@ -543,7 +540,7 @@ void destroy_disassembler(disassembler_t* self){
+ }
+ 
+ static inline cofi_list* get_obj(disassembler_t* self, uint64_t entry_point, tnt_cache_t* tnt_cache_state){
+-	uint64_t tmp_list_element;
++	cofi_list *tmp_obj;
+ 	//if (!count_tnt(tnt_cache_state))
+ 	//	return NULL;
+ 
+@@ -552,29 +549,61 @@ static inline cofi_list* get_obj(disassembler_t* self, uint64_t entry_point, tnt
+ 		return NULL;
+ 	}
+ 
+-	if(map_get(self, entry_point, &tmp_list_element)){
+-		return analyse_assembly(self, entry_point);
++	if(map_get(self, entry_point, (uint64_t *)&tmp_obj)){
++		tmp_obj = analyse_assembly(self, entry_point, false);
+ 	}
+-	return (cofi_list*)tmp_list_element;
++
++	if (!tmp_obj || !tmp_obj->cofi_ptr) {
++		tmp_obj = analyse_assembly(self, entry_point, true);
++	}
++
++	if (!tmp_obj->cofi_ptr) {
++		printf("Fatal error 1 in get_obj.\n"); 
++		asm("int $3\r\n");
++	}
++
++	return tmp_obj;
+ }
+ 
+ void disassembler_flush(disassembler_t* self){
+-  self->has_pending_indirect_branch = false;
+-  self->pending_indirect_branch_src = 0;
++	self->has_pending_indirect_branch = false;
++	self->pending_indirect_branch_src = 0;
+ }
+ 
+ void inform_disassembler_target_ip(disassembler_t* self, uint64_t target_ip){
+-  if(self->has_pending_indirect_branch){
++	if(self->has_pending_indirect_branch){
+ #ifdef CONFIG_REDQUEEN
+-        if(self->redqueen_mode){
+-						WRITE_SAMPLE_DECODED_DETAILED("** %lx -rq-> %lx \n", self->pending_indirect_branch_src, target_ip);
+-            redqueen_register_transition(self->redqueen_state, self->pending_indirect_branch_src, target_ip);
+-        }
++		if(self->redqueen_mode){
++			WRITE_SAMPLE_DECODED_DETAILED("** %lx -rq-> %lx \n", self->pending_indirect_branch_src, target_ip);
++			redqueen_register_transition(self->redqueen_state, self->pending_indirect_branch_src, target_ip);
++		}
+ #endif
+-  disassembler_flush(self);
+-  }
++		disassembler_flush(self);
++	}
++}
++
++static inline cofi_list* get_cofi_ptr(disassembler_t* self, cofi_list *obj)
++{
++	cofi_list *tmp_obj;
++
++	if (!obj->cofi_ptr) {
++		tmp_obj = analyse_assembly(self, obj->cofi.ins_addr, true);
++		if (!tmp_obj->cofi_ptr) {
++			printf("Fatal error 1 in get_cofi_ptr.\n");
++			asm("int $3\r\n");
++		}
++	} else {
++		tmp_obj = obj->cofi_ptr;
++	}
++
++	return tmp_obj;
+ }
+ 
++#define debug_false()\
++{\
++	asm("int $3\r\n");\
++	goto __ret_false;\
++}
+  __attribute__((hot)) bool trace_disassembler(disassembler_t* self, uint64_t entry_point, uint64_t limit, tnt_cache_t* tnt_cache_state){
+ 
+ 	cofi_list *obj, *last_obj;
+@@ -592,13 +621,22 @@ void inform_disassembler_target_ip(disassembler_t* self, uint64_t target_ip){
+ 
+ 	if(!limit_check(entry_point, obj->cofi.ins_addr, limit)){
+ 		WRITE_SAMPLE_DECODED_DETAILED("1\n");
+-		return true;
++		if (count_tnt(tnt_cache_state))
++			debug_false()
++		else
++			return true;
+ 	}
+ 
++	self->handler(entry_point);
++
+ 	while(true){
+ 		
+-		if (!obj)
+-			return false;
++		if (!obj) {
++			if (count_tnt(tnt_cache_state))
++				debug_false()
++			else
++				return true;
++		}
+ 
+ 		switch(obj->cofi.type){
+ 
+@@ -634,7 +672,10 @@ void inform_disassembler_target_ip(disassembler_t* self, uint64_t target_ip){
+ 
+ 						if(!limit_check(last_obj->cofi.target_addr, obj->cofi.ins_addr, limit)){
+ 							WRITE_SAMPLE_DECODED_DETAILED("2\n");
+-							return true;
++							if (count_tnt(tnt_cache_state))
++								debug_false()
++							else
++								return true;
+ 						}
+ 						break;
+ 					case NOT_TAKEN:
+@@ -648,12 +689,13 @@ void inform_disassembler_target_ip(disassembler_t* self, uint64_t target_ip){
+ 
+ 						last_obj = obj;
+ 						/* fix if cofi_ptr is null */
+-    					if(!obj->cofi_ptr){
+-    						obj->cofi_ptr = get_obj(self, obj->cofi.ins_addr+obj->cofi.ins_size, tnt_cache_state);
+-    					}
++						//if(!obj->cofi_ptr){
++						//	obj->cofi_ptr = get_obj(self, obj->cofi.ins_addr+obj->cofi.ins_size, tnt_cache_state);
++						//}
+ 
+ 						self->handler((obj->cofi.ins_addr)+obj->cofi.ins_size);
+-						obj = obj->cofi_ptr;
++						obj = get_cofi_ptr(self, obj);
++						//obj = obj->cofi_ptr;
+ 
+ 						if(!obj){
+ 							return false;
+@@ -661,7 +703,10 @@ void inform_disassembler_target_ip(disassembler_t* self, uint64_t target_ip){
+ 
+ 						if(!limit_check(last_obj->cofi.ins_addr, obj->cofi.ins_addr, limit)){
+ 							WRITE_SAMPLE_DECODED_DETAILED("3\n");
+-							return true;
++							if (count_tnt(tnt_cache_state))
++								debug_false()
++							else
++								return true;
+ 						}
+ 						break;
+ 				}
+@@ -681,7 +726,10 @@ void inform_disassembler_target_ip(disassembler_t* self, uint64_t target_ip){
+ 
+ 				if(!limit_check(last_obj->cofi.target_addr, obj->cofi.ins_addr, limit)){
+ 					WRITE_SAMPLE_DECODED_DETAILED("4\n");
+-					return true;
++					if (count_tnt(tnt_cache_state))
++						debug_false()
++					else
++						return true;
+ 				}
+ 				break;
+ 
+@@ -696,7 +744,10 @@ void inform_disassembler_target_ip(disassembler_t* self, uint64_t target_ip){
+ #endif
+ 				
+ 				WRITE_SAMPLE_DECODED_DETAILED("(2)\t%lx\n",obj->cofi.ins_addr);
+-				return false;
++				if (count_tnt(tnt_cache_state))
++					debug_false()
++				else
++					return true;
+ 
+ 			case COFI_TYPE_NEAR_RET:
+ #ifdef CONFIG_REDQUEEN
+@@ -706,24 +757,39 @@ void inform_disassembler_target_ip(disassembler_t* self, uint64_t target_ip){
+ 				}
+ #endif
+ 				WRITE_SAMPLE_DECODED_DETAILED("(3)\t%lx\n",obj->cofi.ins_addr);
+-				return false;
++				if (count_tnt(tnt_cache_state))
++					debug_false()
++				else
++					return true;
+ 
+ 			case COFI_TYPE_FAR_TRANSFERS:
+ 				WRITE_SAMPLE_DECODED_DETAILED("(4)\t%lx\n",obj->cofi.ins_addr);
+-				return true;
++				if (count_tnt(tnt_cache_state))
++					debug_false()
++				else
++					return true;
+ 
+ 			case NO_COFI_TYPE:
+ 				WRITE_SAMPLE_DECODED_DETAILED("(5)\t%lx\n",obj->cofi.ins_addr);
+-        		if(!(obj->cofi_ptr) || !limit_check(obj->cofi.ins_addr, obj->cofi_ptr->cofi.ins_addr, limit)){
+-          			WRITE_SAMPLE_DECODED_DETAILED("4\n");
+-          			return true;
+-        		}
+-        		obj = obj->cofi_ptr;
++				last_obj = obj;
++				obj = get_cofi_ptr(self, obj);
++
++				if(!limit_check(last_obj->cofi.ins_addr, obj->cofi.ins_addr, limit)){
++					WRITE_SAMPLE_DECODED_DETAILED("4\n");
++					if (count_tnt(tnt_cache_state))
++						debug_false()
++					else
++						return true;
++					return true;
++				}
+ 				break;
+ 			case NO_DISASSEMBLY:
+ 				assert(false);
+ 		}
+ 	}
+-}
+-
+ 
++__ret_false:
++	printf("Fatal error 1 in trace_disassembler.\n");
++	//asm("int $3\r\n");
++	return false;
++}
+diff --git a/pt/disassembler.h b/pt/disassembler.h
+index 7169186..efbfec2 100644
+--- a/pt/disassembler.h
++++ b/pt/disassembler.h
+@@ -64,7 +64,7 @@ typedef struct cofi_list {
+ } cofi_list;
+ 
+ typedef struct disassembler_s{
+-	uint8_t* code;
++	CPUState *cpu;
+ 	uint64_t min_addr;
+ 	uint64_t max_addr;
+ 	void (*handler)(uint64_t);
+@@ -73,7 +73,7 @@ typedef struct disassembler_s{
+ 	cofi_list* list_element;
+ 	bool debug;
+ 	bool has_pending_indirect_branch;
+-  int word_width;
++	int word_width;
+ 	uint64_t pending_indirect_branch_src;
+ #ifdef CONFIG_REDQUEEN
+ 	bool redqueen_mode;
+@@ -82,9 +82,9 @@ typedef struct disassembler_s{
+ } disassembler_t;
+ 
+ #ifdef CONFIG_REDQUEEN
+-disassembler_t* init_disassembler(uint8_t* code, uint64_t min_addr, uint64_t max_addr, int disassembler_word_width, void (*handler)(uint64_t), redqueen_t *redqueen_state);
++disassembler_t* init_disassembler(CPUState *cpu, uint64_t min_addr, uint64_t max_addr, int disassembler_word_width, void (*handler)(uint64_t), redqueen_t *redqueen_state);
+ #else
+-disassembler_t* init_disassembler(uint8_t* code, uint64_t min_addr, uint64_t max_addr, int disassembler_word_width, void (*handler)(uint64_t));
++disassembler_t* init_disassembler(CPUState *cpu, uint64_t min_addr, uint64_t max_addr, int disassembler_word_width, void (*handler)(uint64_t));
+ #endif
+ 
+ int get_capstone_mode(int word_width_in_bits);
+diff --git a/pt/hypercall.c b/pt/hypercall.c
+index 842a90b..d41419d 100644
+--- a/pt/hypercall.c
++++ b/pt/hypercall.c
+@@ -223,6 +223,8 @@ void pt_setup_payload(void* ptr){
+ 
+ bool handle_hypercall_kafl_next_payload(struct kvm_run *run, CPUState *cpu){
+ 	if(hypercall_enabled){
++		//debugging_code
++		printf("KAFL_NEXT_PAYLOAD from the guest\n");
+ 		if (init_state){
+ 			synchronization_lock(cpu);
+ 		} else {
+@@ -239,11 +241,11 @@ bool handle_hypercall_kafl_next_payload(struct kvm_run *run, CPUState *cpu){
+ 				for(int i = 0; i < INTEL_PT_MAX_RANGES; i++){
+ 					//printf("=> %d\n", i);
+ 					if(filter_enabled[i]){
+-	#ifdef CONFIG_REDQUEEN
++#ifdef CONFIG_REDQUEEN
+ 						pt_enable_ip_filtering(cpu, i, filter[i][0], filter[i][1], true, false);
+-	#else					
++#else					
+ 						pt_enable_ip_filtering(cpu, i, filter[i][0], filter[i][1], false);
+-	#endif			
++#endif			
+ 					}
+ 				}
+ 			}
+@@ -292,6 +294,8 @@ void handle_hypercall_kafl_release(struct kvm_run *run, CPUState *cpu){
+ 		if (init_state){
+ 			init_state = false;	
+ 
++			//debugging_code
++			printf("KAFL_PROTO_RELEASE from the guest\n");
+ 			hypercall_snd_char(KAFL_PROTO_RELEASE);
+ 		} else {
+ 
+@@ -306,14 +310,12 @@ void handle_hypercall_kafl_cr3(struct kvm_run *run, CPUState *cpu){
+ 		QEMU_PT_PRINTF(CORE_PREFIX, "Got CR3 address:\t\t%llx", run->hypercall.args[0]);
+ 		pt_set_cr3(cpu, run->hypercall.args[0], false);
+ 
+-		if (cpu->disassembler_word_width == 0) {
+-			if (run->hypercall.longmode) {
+-				QEMU_PT_PRINTF(CORE_PREFIX, "Auto-detected word width as 64bit (longmode=%d)", run->hypercall.longmode);
+-				cpu->disassembler_word_width = 64;
+-			} else {
+-				QEMU_PT_PRINTF(CORE_PREFIX, "Auto-detected word width as 32bit (longmode=%d)", run->hypercall.longmode);
+-				cpu->disassembler_word_width = 32;
+-			}
++		if (run->hypercall.longmode) {
++			QEMU_PT_PRINTF(CORE_PREFIX, "Auto-detected word width as 64bit (longmode=%d)", run->hypercall.longmode);
++			cpu->disassembler_word_width = 64;
++		} else {
++			QEMU_PT_PRINTF(CORE_PREFIX, "Auto-detected word width as 32bit (longmode=%d)", run->hypercall.longmode);
++			cpu->disassembler_word_width = 32;
+ 		}
+ 	}
+ }
+@@ -374,19 +376,23 @@ void handle_hypercall_kafl_kasan(struct kvm_run *run, CPUState *cpu){
+ }
+ 
+ void handle_hypercall_kafl_lock(struct kvm_run *run, CPUState *cpu){
++	/*
+ 	if(create_snapshot_enabled){
+ 		Error *err = NULL;
+ 		QEMU_PT_PRINTF(CORE_PREFIX, "Creating snapshot <kafl> ...");
+ 		qemu_mutex_lock_iothread();
+ 		kvm_cpu_synchronize_state(qemu_get_cpu(0));
+ 		save_snapshot("kafl", &err);
+-        if (err)
+-            error_reportf_err(err, "Error: ");
++	if (err)
++		error_reportf_err(err, "Error: ");
+ 
+ 		qemu_mutex_unlock_iothread();
+ 		QEMU_PT_PRINTF(CORE_PREFIX, "Done. Shutting down..");
+ 		qemu_system_shutdown_request(SHUTDOWN_CAUSE_HOST_SIGNAL);
+ 	}
++	*/
++	printf("kAFL: VM PAUSED - CREATE SNAPSHOT NOW!\n");
++	vm_stop(RUN_STATE_PAUSED);
+ }
+ 
+ void handle_hypercall_kafl_info(struct kvm_run *run, CPUState *cpu){
+@@ -500,7 +506,7 @@ void handle_hypercall_kafl_user_abort(struct kvm_run *run, CPUState *cpu){
+ #ifdef CONFIG_REDQUEEN
+ bool handle_hypercall_kafl_hook(struct kvm_run *run, CPUState *cpu){
+ 	X86CPU *cpux86 = X86_CPU(cpu);
+-    CPUX86State *env = &cpux86->env;
++	CPUX86State *env = &cpux86->env;
+ 
+ 	for(uint8_t i = 0; i < INTEL_PT_MAX_RANGES; i++){
+ 		if (cpu->redqueen_state[i]){
+@@ -521,8 +527,8 @@ void pt_enable_rqi(CPUState *cpu){
+ 
+ void pt_disable_rqi(CPUState *cpu){
+ 	cpu->redqueen_disable_pending = true;
+-  cpu->redqueen_instrumentation_mode = REDQUEEN_NO_INSTRUMENTATION;
+-  	((uint8_t*) payload_buffer)[PAYLOAD_SIZE-1] = 0;
++	cpu->redqueen_instrumentation_mode = REDQUEEN_NO_INSTRUMENTATION;
++	((uint8_t*) payload_buffer)[PAYLOAD_SIZE-1] = 0;
+ 
+ }
+ 
+@@ -531,12 +537,12 @@ void pt_set_enable_patches_pending(CPUState *cpu){
+ }
+ 
+ void pt_set_redqueen_instrumentation_mode(CPUState *cpu, int redqueen_mode){
+-  cpu->redqueen_instrumentation_mode = redqueen_mode;
++	cpu->redqueen_instrumentation_mode = redqueen_mode;
+ }
+ 
+ void pt_set_redqueen_update_blacklist(CPUState *cpu, bool newval){
+-  assert(!newval || !cpu->redqueen_update_blacklist);
+-  cpu->redqueen_update_blacklist = newval;
++	assert(!newval || !cpu->redqueen_update_blacklist);
++	cpu->redqueen_update_blacklist = newval;
+ }
+ 
+ void pt_set_disable_patches_pending(CPUState *cpu){
+diff --git a/pt/interface.c b/pt/interface.c
+index f077be6..59f5ec3 100644
+--- a/pt/interface.c
++++ b/pt/interface.c
+@@ -87,7 +87,10 @@ static void kafl_guest_event(void *opaque, QEMUChrEvent event){
+ 
+ static void send_char(char val, void* tmp_s){
+ 	kafl_mem_state *s = tmp_s;
+-	qemu_chr_fe_write(&s->chr, (const uint8_t *) &val, 1);
++        //debugging_code
++        int res;
++	res = qemu_chr_fe_write(&s->chr, (const uint8_t *) &val, 1);
++        printf("send char: %c, res: %d\n", val, res);
+ }
+ 
+ static int kafl_guest_can_receive(void * opaque){
+diff --git a/pt/memory_access.c b/pt/memory_access.c
+index a7eeeb5..230e971 100644
+--- a/pt/memory_access.c
++++ b/pt/memory_access.c
+@@ -11,16 +11,13 @@
+ #include "hypercall.h"
+ #include "debug.h"
+ 
+-#define x86_64_PAGE_SIZE    	0x1000
+-#define x86_64_PAGE_MASK   		~(x86_64_PAGE_SIZE - 1)
+-
+ bool read_virtual_memory(uint64_t address, uint8_t* data, uint32_t size, CPUState *cpu){
+ 	uint8_t tmp_buf[x86_64_PAGE_SIZE];
+ 	MemTxAttrs attrs;
+ 	hwaddr phys_addr;
+ 	int asidx;
+-	
+-  uint64_t amount_copied = 0;
++	bool ret = true;
++	uint64_t amount_copied = 0;
+ 	
+ 	//cpu_synchronize_state(cpu);
+ 	kvm_cpu_synchronize_state(cpu);
+@@ -28,44 +25,45 @@ bool read_virtual_memory(uint64_t address, uint8_t* data, uint32_t size, CPUStat
+ 	/* copy per page */
+ 	while(amount_copied < size){
+ 		uint64_t len_to_copy = (size - amount_copied);
+-    if(len_to_copy > x86_64_PAGE_SIZE)
+-      len_to_copy = x86_64_PAGE_SIZE;
++		if(len_to_copy > x86_64_PAGE_SIZE)
++			len_to_copy = x86_64_PAGE_SIZE;
+ 
+ 		asidx = cpu_asidx_from_attrs(cpu, MEMTXATTRS_UNSPECIFIED);
+ 		attrs = MEMTXATTRS_UNSPECIFIED;
+ 		phys_addr = cpu_get_phys_page_attrs_debug(cpu, (address & x86_64_PAGE_MASK), &attrs);
+ 
+-    if (phys_addr == -1){
+-      uint64_t next_page = (address & x86_64_PAGE_MASK) + x86_64_PAGE_SIZE;
+-      uint64_t len_skipped =next_page-address;  
+-      if(len_skipped > size-amount_copied){
+-        len_skipped = size-amount_copied;
+-      }
+-
+-      QEMU_PT_PRINTF(MEM_PREFIX, "Warning, read from unmapped memory:\t%lx, skipping to %lx", address, next_page);
+-		  memset( data+amount_copied, ' ',  len_skipped);
+-      address += len_skipped;
+-      amount_copied += len_skipped;
+-      continue;
+-    }
+-		
++		if (phys_addr == -1){
++			uint64_t next_page = (address & x86_64_PAGE_MASK) + x86_64_PAGE_SIZE;
++			uint64_t len_skipped =next_page-address;  
++			if(len_skipped > size-amount_copied){
++				len_skipped = size-amount_copied;
++			}
++
++			QEMU_PT_PRINTF(MEM_PREFIX, "Warning, read from unmapped memory:\t%lx, skipping to %lx", address, next_page);
++			memset( data+amount_copied, ' ',  len_skipped);
++			address += len_skipped;
++			amount_copied += len_skipped;
++			ret = false;
++			continue;
++		}
++			
+ 		phys_addr += (address & ~x86_64_PAGE_MASK);
+-    uint64_t remaining_on_page = x86_64_PAGE_SIZE - (address & ~x86_64_PAGE_MASK);
+-    if(len_to_copy > remaining_on_page){
+-      len_to_copy = remaining_on_page;
+-    }
++		uint64_t remaining_on_page = x86_64_PAGE_SIZE - (address & ~x86_64_PAGE_MASK);
++		if(len_to_copy > remaining_on_page){
++			len_to_copy = remaining_on_page;
++		}
+ 		MemTxResult txt = address_space_rw(cpu_get_address_space(cpu, asidx), phys_addr, MEMTXATTRS_UNSPECIFIED, tmp_buf, len_to_copy, 0);
+-    if(txt){
+-      QEMU_PT_PRINTF(MEM_PREFIX, "Warning, read failed:\t%lx", address);
+-    }
+-		
++		if(txt){
++			QEMU_PT_PRINTF(MEM_PREFIX, "Warning, read failed:\t%lx", address);
++		}
++			
+ 		memcpy(data+amount_copied, tmp_buf, len_to_copy);
+-		
++			
+ 		address += len_to_copy;
+ 		amount_copied += len_to_copy;
+ 	}
+ 	
+-	return true;
++	return ret;
+ }
+ 
+ bool is_addr_mapped(uint64_t address, CPUState *cpu){
+@@ -81,39 +79,39 @@ bool write_virtual_memory(uint64_t address, uint8_t* data, uint32_t size, CPUSta
+ {
+ 	int asidx;
+ 	MemTxAttrs attrs;
+-    hwaddr phys_addr;
+-    MemTxResult res;
++	hwaddr phys_addr;
++	MemTxResult res;
+ 
+-    uint64_t counter, l, i;
++	uint64_t counter, l, i;
+ 
+-    counter = size;
++	counter = size;
+ 	while(counter != 0){
+ 		l = x86_64_PAGE_SIZE;
+-        if (l > counter)
+-            l = counter;
++		if (l > counter)
++		l = counter;
+ 
+-	kvm_cpu_synchronize_state(cpu);
+-        //cpu_synchronize_state(cpu);
+-        asidx = cpu_asidx_from_attrs(cpu, MEMTXATTRS_UNSPECIFIED);
+-        attrs = MEMTXATTRS_UNSPECIFIED;
+-        phys_addr = cpu_get_phys_page_attrs_debug(cpu, (address & x86_64_PAGE_MASK), &attrs);
+-
+-        if (phys_addr == -1){
+-        	QEMU_PT_PRINTF(MEM_PREFIX, "phys_addr == -1:\t%lx", address);
+-            return false;
+-        }
+-        
+-        phys_addr += (address & ~x86_64_PAGE_MASK);   
+-        res = address_space_rw(cpu_get_address_space(cpu, asidx), phys_addr, MEMTXATTRS_UNSPECIFIED, data, l, true);
+-        if (res != MEMTX_OK){
+-        	QEMU_PT_PRINTF(MEM_PREFIX, "!MEMTX_OK:\t%lx", address);
+-            return false;
+-        }   
+-
+-        i++;
+-        data += l;
+-        address += l;
+-        counter -= l;
++		kvm_cpu_synchronize_state(cpu);
++		//cpu_synchronize_state(cpu);
++		asidx = cpu_asidx_from_attrs(cpu, MEMTXATTRS_UNSPECIFIED);
++		attrs = MEMTXATTRS_UNSPECIFIED;
++		phys_addr = cpu_get_phys_page_attrs_debug(cpu, (address & x86_64_PAGE_MASK), &attrs);
++
++		if (phys_addr == -1){
++			QEMU_PT_PRINTF(MEM_PREFIX, "phys_addr == -1:\t%lx", address);
++			return false;
++		}
++		
++		phys_addr += (address & ~x86_64_PAGE_MASK);   
++		res = address_space_rw(cpu_get_address_space(cpu, asidx), phys_addr, MEMTXATTRS_UNSPECIFIED, data, l, true);
++		if (res != MEMTX_OK){
++			QEMU_PT_PRINTF(MEM_PREFIX, "!MEMTX_OK:\t%lx", address);
++			return false;
++		}   
++
++		i++;
++		data += l;
++		address += l;
++		counter -= l;
+ 	}
+ 
+ 	return true;
+@@ -128,26 +126,26 @@ void hexdump_virtual_memory(uint64_t address, uint32_t size, CPUState *cpu){
+ 
+ 	if(success){
+ 		for (i = 0; i < size; i++){
+-	        if(!(i % 16)){
+-	        	if (i != 0){
+-                	printf ("  %s\n", tmp);
+-                }
+-	            printf ("  %04lx ", i);
+-	        }
+-	        printf (" %02x", data[i]);
+-
+-	        if ((data[i] < 0x20) || (data[i] > 0x7e))
+-	            tmp[i % 16] = '.';
+-	        else
+-	            tmp[i % 16] = data[i];
+-	        tmp[(i % 16) + 1] = '\0';
+-	    }
+-
+-	    while ((i % 16) != 0) {
+-	        printf ("   ");
+-	        i++;
+-	    }
+-	    printf ("  %s\n", tmp);
++		if(!(i % 16)){
++			if (i != 0){
++			printf ("  %s\n", tmp);
++		}
++			printf ("  %04lx ", i);
++		}
++		printf (" %02x", data[i]);
++
++		if ((data[i] < 0x20) || (data[i] > 0x7e))
++			tmp[i % 16] = '.';
++		else
++			tmp[i % 16] = data[i];
++		tmp[(i % 16) + 1] = '\0';
++		}
++
++		while ((i % 16) != 0) {
++			printf ("   ");
++			i++;
++		}
++		printf ("  %s\n", tmp);
+ 	}
+ 
+ 	free(data);
+@@ -155,58 +153,76 @@ void hexdump_virtual_memory(uint64_t address, uint32_t size, CPUState *cpu){
+ 
+ bool write_virtual_shadow_memory(uint64_t address, uint8_t* data, uint32_t size, CPUState *cpu)
+ {
+-    /* Todo: later &address_space_memory + phys_addr -> mmap SHARED */
+-    int asidx;
+-    MemTxAttrs attrs;
+-    hwaddr phys_addr;
+-    MemTxResult res;
+-
+-    uint64_t counter, l, i;
+-
+-    void* shadow_memory = NULL;
+-
+-    counter = size;
+-    while(counter != 0){
+-        l = x86_64_PAGE_SIZE;
+-        if (l > counter)
+-            l = counter;
+-
+-        kvm_cpu_synchronize_state(cpu);
+-        //cpu_synchronize_state(cpu);
+-        asidx = cpu_asidx_from_attrs(cpu, MEMTXATTRS_UNSPECIFIED);
+-        attrs = MEMTXATTRS_UNSPECIFIED;
+-        phys_addr = cpu_get_phys_page_attrs_debug(cpu, (address & x86_64_PAGE_MASK), &attrs);
+-
+-        if (phys_addr == -1){
+-            QEMU_PT_PRINTF(MEM_PREFIX, "phys_addr == -1:\t%lx", address);
+-            return false;
+-        }
+-        
+-        res = address_space_rw(cpu_get_address_space(cpu, asidx), (phys_addr + (address & ~x86_64_PAGE_MASK)), MEMTXATTRS_UNSPECIFIED, data, l, true);
+-        if (res != MEMTX_OK){
+-            QEMU_PT_PRINTF(MEM_PREFIX, "!MEMTX_OK:\t%lx", address);
+-            return false;
+-        }   
+-
+-        assert(false);
+-        shadow_memory = 0;//*get_physmem_shadow_ptr(phys_addr);
+-        if (shadow_memory){
+-              memcpy(shadow_memory + (address & ~x86_64_PAGE_MASK), data, l);
+-        }
+-        else{
+-            QEMU_PT_PRINTF(MEM_PREFIX, "get_physmem_shadow_ptr(%lx) == NULL", phys_addr);
+-            assert(false);
+-            return false;
+-        }
+-
+-        phys_addr += (address & ~x86_64_PAGE_MASK);   
+-
+-
+-        i++;
+-        data += l;
+-        address += l;
+-        counter -= l;
+-    }
+-
+-    return true;
++	/* Todo: later &address_space_memory + phys_addr -> mmap SHARED */
++	int asidx;
++	MemTxAttrs attrs;
++	hwaddr phys_addr;
++	MemTxResult res;
++	
++	uint64_t counter, l, i;
++	
++	void* shadow_memory = NULL;
++	
++	counter = size;
++	while(counter != 0){
++		l = x86_64_PAGE_SIZE;
++		if (l > counter)
++			l = counter;
++
++		kvm_cpu_synchronize_state(cpu);
++		//cpu_synchronize_state(cpu);
++		asidx = cpu_asidx_from_attrs(cpu, MEMTXATTRS_UNSPECIFIED);
++		attrs = MEMTXATTRS_UNSPECIFIED;
++		phys_addr = cpu_get_phys_page_attrs_debug(cpu, (address & x86_64_PAGE_MASK), &attrs);
++	
++		if (phys_addr == -1){
++			QEMU_PT_PRINTF(MEM_PREFIX, "phys_addr == -1:\t%lx", address);
++			return false;
++		}
++		
++		res = address_space_rw(cpu_get_address_space(cpu, asidx), (phys_addr + (address & ~x86_64_PAGE_MASK)), MEMTXATTRS_UNSPECIFIED, data, l, true);
++		if (res != MEMTX_OK){
++			QEMU_PT_PRINTF(MEM_PREFIX, "!MEMTX_OK:\t%lx", address);
++			return false;
++		}   
++	
++		assert(false);
++		shadow_memory = 0;//*get_physmem_shadow_ptr(phys_addr);
++		if (shadow_memory){
++			memcpy(shadow_memory + (address & ~x86_64_PAGE_MASK), data, l);
++		}
++		else{
++			QEMU_PT_PRINTF(MEM_PREFIX, "get_physmem_shadow_ptr(%lx) == NULL", phys_addr);
++			assert(false);
++			return false;
++		}
++	
++		phys_addr += (address & ~x86_64_PAGE_MASK);   
++	
++		i++;
++		data += l;
++		address += l;
++		counter -= l;
++	}
++	
++	return true;
++}
++
++/* Mmap guest virtual address to host address with size of 1 */
++void *mmap_virtual_memory(uint64_t address, CPUState *cpu)
++{
++	hwaddr phys_addr;
++	hwaddr len = 1;
++	phys_addr = cpu_get_phys_page_debug(cpu, (address & x86_64_PAGE_MASK));
++	if (phys_addr == -1) {
++		printf("pu_get_phys_page_debug return -1 with address of %lx\n", address);
++		return NULL;
++	}
++
++	return cpu_physical_memory_map(phys_addr + (address & ~x86_64_PAGE_MASK), &len, false);
++}
++
++void munmap_virtual_memory(void *buffer, CPUState *cpu)
++{
++	cpu_physical_memory_unmap(buffer, 1, false, 1);
+ }
+diff --git a/pt/memory_access.h b/pt/memory_access.h
+index 96f5ff2..e485f37 100644
+--- a/pt/memory_access.h
++++ b/pt/memory_access.h
+@@ -16,9 +16,14 @@
+ #include "qemu-common.h"
+ #include "sysemu/kvm_int.h"
+ 
++#define x86_64_PAGE_SIZE	0x1000
++#define x86_64_PAGE_MASK	~(x86_64_PAGE_SIZE - 1)
++
+ bool read_virtual_memory(uint64_t address, uint8_t* data, uint32_t size, CPUState *cpu);
+ bool write_virtual_memory(uint64_t address, uint8_t* data, uint32_t size, CPUState *cpu);
+ void hexdump_virtual_memory(uint64_t address, uint32_t size, CPUState *cpu);
+ bool write_virtual_shadow_memory(uint64_t address, uint8_t* data, uint32_t size, CPUState *cpu);
+ bool is_addr_mapped(uint64_t address, CPUState *cpu);
++void *mmap_virtual_memory(uint64_t address, CPUState *cpu);
++void munmap_virtual_memory(void *buffer, CPUState *cpu);
+ #endif
+diff --git a/pt/redqueen.c b/pt/redqueen.c
+index aaea7ef..67805c4 100644
+--- a/pt/redqueen.c
++++ b/pt/redqueen.c
+@@ -39,9 +39,8 @@ void setup_redqueen_workdir(char* workdir){
+    assert(asprintf(&redqueen_workdir.target_code_dump,"%s/target_code_dump.img", workdir)>0);
+ }
+ 
+-redqueen_t* new_rq_state(uint8_t *code, uint64_t start_range, uint64_t end_range, CPUState *cpu){
++redqueen_t* new_rq_state(uint64_t start_range, uint64_t end_range, CPUState *cpu){
+ 	redqueen_t* res = malloc(sizeof(redqueen_t));
+-	res->code = code;
+ 	res->address_range_start = start_range;
+ 	res->address_range_end = end_range;
+ 	res->cpu = cpu;
+@@ -384,15 +383,17 @@ bool redqueen_get_operands_at(redqueen_t* self, uint64_t addr, asm_operand_t *op
+   asm_decoder_clear(op2);
+ 	csh handle;
+ 	cs_insn *insn;
+-	uint8_t* code = (self->code+(addr-self->address_range_start));
++        size_t code_size = 15;
++        uint8_t code[15], *pcode = code;
++        if (!read_virtual_memory(addr, code, code_size, self->cpu))
++    	    return false;
+ 	uint64_t cs_address = addr;
+ 
+-	size_t code_size = self->address_range_end - addr;
+ 	//assert(self->disassembler_word_width == 32 || self->disassembler_word_width == 64);
+ 	if (cs_open(CS_ARCH_X86, get_capstone_mode(self->cpu->disassembler_word_width), &handle) == CS_ERR_OK){
+ 		cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
+ 		insn = cs_malloc(handle);
+-		assert(cs_disasm_iter(handle, (const uint8_t **) &code, &code_size, &cs_address, insn)==1);
++		assert(cs_disasm_iter(handle, (const uint8_t **) &pcode, &code_size, &cs_address, insn)==1);
+ 
+     parse_op_str2(insn->op_str, op1, op2);
+ 
+@@ -634,9 +635,12 @@ static void handle_hook_breakpoint(redqueen_t* self){
+     csh handle;
+     cs_insn *insn;
+     uint64_t ip = env->eip;
+-    uint8_t* code = (self->code+(ip-self->address_range_start));
++    //uint8_t* code = (self->code+(ip-self->address_range_start));
++    size_t code_size = 15;
++    uint8_t code[15];
++    if (!read_virtual_memory(ip, code, code_size, self->cpu))
++	    return;
+     //uint64_t cs_address = ip;
+-	  size_t code_size = self->address_range_end - ip;
+     if (cs_open(CS_ARCH_X86, get_capstone_mode(self->cpu->disassembler_word_width), &handle) == CS_ERR_OK){
+       cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
+       size_t count = cs_disasm(handle, code, code_size, ip, 1, &insn);
+diff --git a/pt/redqueen.h b/pt/redqueen.h
+index 396f772..2473414 100644
+--- a/pt/redqueen.h
++++ b/pt/redqueen.h
+@@ -60,7 +60,6 @@ enum operand_types{VALUE64, VALUE32, VALUE16, VALUE8, VALUE8H, VALUE8L};
+ #define CMP_BITMAP_SHOULD_HOOK_RQ (CMP_BITMAP_RQ_INSTRUCTION)
+ 
+ typedef struct redqueen_s{
+-	uint8_t* code;
+ 	uint64_t bitmap_size;
+ 	uint8_t* bitmap;
+ 	uint32_t* counter_bitmap;
+@@ -90,7 +89,7 @@ extern redqueen_workdir_t redqueen_workdir;
+ 
+ void setup_redqueen_workdir(char* workdir);
+ 
+-redqueen_t* new_rq_state(uint8_t *code, uint64_t start_range, uint64_t end_range, CPUState *cpu);
++redqueen_t* new_rq_state(uint64_t start_range, uint64_t end_range, CPUState *cpu);
+ void destroy_rq_state(redqueen_t* self);
+ 
+ void set_rq_instruction(redqueen_t* self, uint64_t addr);

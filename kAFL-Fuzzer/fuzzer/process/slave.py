@@ -39,10 +39,10 @@ def slave_loader(slave_id):
     # sys.stdout = open("slave_%d.out"%slave_id, "w")
     config = FuzzerConfiguration()
 
-    if config.argument_values["cpu_affinity"]:
-        psutil.Process().cpu_affinity([config.argument_values["cpu_affinity"]])
-    else:
-        psutil.Process().cpu_affinity([slave_id])
+    #if config.argument_values["cpu_affinity"]:
+    #    psutil.Process().cpu_affinity([config.argument_values["cpu_affinity"]])
+    #else:
+    #    psutil.Process().cpu_affinity([slave_id])
 
     connection = ClientConnection(slave_id, config)
 
