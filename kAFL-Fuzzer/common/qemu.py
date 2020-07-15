@@ -289,8 +289,6 @@ class qemu:
                 except:
                     log_qemu("[SEND] " + "unknown cmd '" + res + "'", self.qemu_id)
         try:
-            #debugging_code
-            log_qemu("fuzzer send: " + str(cmd), self.qemu_id)
             self.control.send(cmd)
         except (BrokenPipeError, OSError):
             if not self.exiting:
@@ -618,14 +616,14 @@ class qemu:
     def check_recv(self, timeout_detection=True):
         if timeout_detection:
             #debugging_code
-            ready = select.select([self.control], [], [], 0.25)
-            #ready = select.select([self.control], [], [])
+            #ready = select.select([self.control], [], [], 0.25)
+            ready = select.select([self.control], [], [], 5)
             if not ready[0]:
                 return 2
         else:
             #debugging_code
-            ready = select.select([self.control], [], [], 5.0)
-            #ready = select.select([self.control], [], [])
+            #ready = select.select([self.control], [], [], 5.0)
+            ready = select.select([self.control], [], [])
             if not ready[0]:
                 return 2
 
@@ -674,9 +672,7 @@ class qemu:
         return result
 
     def send_payload(self, apply_patches=True, timeout_detection=True, max_iterations=10):
-
-        if (self.debug_mode):
-            log_qemu("Send payload..", self.qemu_id)
+        log_qemu("Send payload..", self.qemu_id)
 
         if self.exiting:
             sys.exit(0)

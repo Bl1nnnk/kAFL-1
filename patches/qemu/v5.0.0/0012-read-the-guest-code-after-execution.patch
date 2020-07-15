@@ -12,7 +12,7 @@ index e29068d..d8fdc5d 100644
  #else
  
 diff --git a/pt.c b/pt.c
-index 1dd2692..ea5d6d9 100644
+index 1dd2692..869cfc5 100644
 --- a/pt.c
 +++ b/pt.c
 @@ -188,7 +188,6 @@ int pt_enable_ip_filtering(CPUState *cpu, uint8_t addrn, uint64_t ip_a, uint64_t
@@ -83,15 +83,19 @@ index 1dd2692..ea5d6d9 100644
  
  	cpu->pt_c3_filter = 0;
  	cpu->pt_target_file = NULL;
-@@ -328,6 +298,7 @@ void pt_kvm_init(CPUState *cpu){
+@@ -328,6 +298,11 @@ void pt_kvm_init(CPUState *cpu){
  	cpu->reload_pending = false;
  	cpu->executing = false;
  	cpu->intel_pt_run_trashed = false;
 +
++	//bool debugging_code = 1;
++	//while (debugging_code) {
++	//	sleep(1);
++	//}
  }
  
  struct vmx_pt_filter_iprs {
-@@ -448,7 +419,7 @@ void pt_handle_overflow(CPUState *cpu){
+@@ -448,7 +423,7 @@ void pt_handle_overflow(CPUState *cpu){
  	//printf("%s\n", __func__);
  	int overflow = ioctl(cpu->pt_fd, KVM_VMX_PT_CHECK_TOPA_OVERFLOW, (unsigned long)0);
  	if (overflow > 0){
@@ -328,7 +332,7 @@ index 0067252..380eb74 100644
  /* returns false if the CPU trashed our tracing run ... thank you Intel btw ... */
   __attribute__((hot)) bool decode_buffer(decoder_t* self, uint8_t* map, size_t len);
 diff --git a/pt/disassembler.c b/pt/disassembler.c
-index 22c9a8b..96d0d8d 100644
+index 22c9a8b..086d6a0 100644
 --- a/pt/disassembler.c
 +++ b/pt/disassembler.c
 @@ -11,6 +11,7 @@
@@ -668,31 +672,36 @@ index 22c9a8b..96d0d8d 100644
  	while(cs_disasm_iter(handle, &code, &code_size, &address, insn)) {	
  		if (insn->address > self->max_addr){
  			break;
-@@ -429,8 +437,6 @@ static cofi_list* analyse_assembly(disassembler_t* self, uint64_t base_address){
+@@ -429,38 +437,25 @@ static cofi_list* analyse_assembly(disassembler_t* self, uint64_t base_address){
  		//}
  		
  		if (!last_nop){
 -			
 -	
- 			edit_cofi_ptr(predecessor, self->list_element);
- 			predecessor = self->list_element;
- 			self->list_element = new_list_element(self->list_element);
-@@ -438,29 +444,17 @@ static cofi_list* analyse_assembly(disassembler_t* self, uint64_t base_address){
- 			//tmp = malloc(sizeof(cofi_header));
+-			edit_cofi_ptr(predecessor, self->list_element);
+-			predecessor = self->list_element;
+-			self->list_element = new_list_element(self->list_element);
++			if (cofi)
++				predecessor = self->list_element;
+ 
+-			//tmp = malloc(sizeof(cofi_header));
++			self->list_element = new_list_element(self->list_element);
  			self->list_element->cofi.type = NO_COFI_TYPE;
  			self->list_element->cofi.ins_addr = insn->address;
 -      		self->list_element->cofi.ins_size = insn->size;
 +			self->list_element->cofi.ins_size = insn->size;
  			self->list_element->cofi.target_addr = 0;
- 		}
- 		
+-		}
+-		
 -		if (map_exist(self, insn->address)){
 -			//if(tmp){
 -				map_get(self, insn->address, &tmp_list_element);
 -				edit_cofi_ptr(self->list_element, (cofi_list*)tmp_list_element);
--
+ 
 -				
--		
++			edit_cofi_ptr(predecessor, self->list_element);
++		}
+ 		
 -				edit_cofi_ptr(predecessor, self->list_element);
 -				predecessor = self->list_element;
 -				self->list_element = new_list_element(self->list_element);
@@ -715,7 +724,7 @@ index 22c9a8b..96d0d8d 100644
  		}
  		
  		if (type != NO_COFI_TYPE){
-@@ -476,12 +470,12 @@ static cofi_list* analyse_assembly(disassembler_t* self, uint64_t base_address){
+@@ -476,12 +471,12 @@ static cofi_list* analyse_assembly(disassembler_t* self, uint64_t base_address){
  			}
  			//self->list_element->cofi = tmp;
  			map_put(self, self->list_element->cofi.ins_addr, (uint64_t)(self->list_element));
@@ -734,7 +743,7 @@ index 22c9a8b..96d0d8d 100644
  		} else {
  			last_nop = true;
  			map_put(self, insn->address, (uint64_t)(self->list_element));
-@@ -491,22 +485,25 @@ static cofi_list* analyse_assembly(disassembler_t* self, uint64_t base_address){
+@@ -491,22 +486,25 @@ static cofi_list* analyse_assembly(disassembler_t* self, uint64_t base_address){
  			first = self->list_element;
  		}
  
@@ -766,7 +775,7 @@ index 22c9a8b..96d0d8d 100644
  	res->min_addr = min_addr;
  	res->max_addr = max_addr;
  	res->handler = handler;
-@@ -515,13 +512,13 @@ disassembler_t* init_disassembler(uint8_t* code, uint64_t min_addr, uint64_t max
+@@ -515,13 +513,13 @@ disassembler_t* init_disassembler(uint8_t* code, uint64_t min_addr, uint64_t max
  	res->list_head = create_list_head();
  	res->word_width = disassembler_word_width;
  	res->list_element = res->list_head;
@@ -785,7 +794,7 @@ index 22c9a8b..96d0d8d 100644
  #endif
  
  #ifdef CONFIG_REDQUEEN
-@@ -543,7 +540,7 @@ void destroy_disassembler(disassembler_t* self){
+@@ -543,7 +541,7 @@ void destroy_disassembler(disassembler_t* self){
  }
  
  static inline cofi_list* get_obj(disassembler_t* self, uint64_t entry_point, tnt_cache_t* tnt_cache_state){
@@ -794,7 +803,7 @@ index 22c9a8b..96d0d8d 100644
  	//if (!count_tnt(tnt_cache_state))
  	//	return NULL;
  
-@@ -552,29 +549,61 @@ static inline cofi_list* get_obj(disassembler_t* self, uint64_t entry_point, tnt
+@@ -552,29 +550,61 @@ static inline cofi_list* get_obj(disassembler_t* self, uint64_t entry_point, tnt
  		return NULL;
  	}
  
@@ -802,12 +811,12 @@ index 22c9a8b..96d0d8d 100644
 -		return analyse_assembly(self, entry_point);
 +	if(map_get(self, entry_point, (uint64_t *)&tmp_obj)){
 +		tmp_obj = analyse_assembly(self, entry_point, false);
- 	}
--	return (cofi_list*)tmp_list_element;
++	}
 +
 +	if (!tmp_obj || !tmp_obj->cofi_ptr) {
 +		tmp_obj = analyse_assembly(self, entry_point, true);
-+	}
+ 	}
+-	return (cofi_list*)tmp_list_element;
 +
 +	if (!tmp_obj->cofi_ptr) {
 +		printf("Fatal error 1 in get_obj.\n"); 
@@ -868,9 +877,16 @@ index 22c9a8b..96d0d8d 100644
   __attribute__((hot)) bool trace_disassembler(disassembler_t* self, uint64_t entry_point, uint64_t limit, tnt_cache_t* tnt_cache_state){
  
  	cofi_list *obj, *last_obj;
-@@ -592,13 +621,22 @@ void inform_disassembler_target_ip(disassembler_t* self, uint64_t target_ip){
+@@ -587,18 +617,25 @@ void inform_disassembler_target_ip(disassembler_t* self, uint64_t target_ip){
  
- 	if(!limit_check(entry_point, obj->cofi.ins_addr, limit)){
+ 	obj = get_obj(self, entry_point, tnt_cache_state);
+ 
+-	if (!obj)
+-		return false;
+-
+-	if(!limit_check(entry_point, obj->cofi.ins_addr, limit)){
++	//if(!limit_check(entry_point, obj->cofi.ins_addr, limit)){
++	if (!obj || out_of_bounds(self, obj->cofi.ins_addr)) {
  		WRITE_SAMPLE_DECODED_DETAILED("1\n");
 -		return true;
 +		if (count_tnt(tnt_cache_state))
@@ -894,9 +910,17 @@ index 22c9a8b..96d0d8d 100644
  
  		switch(obj->cofi.type){
  
-@@ -634,7 +672,10 @@ void inform_disassembler_target_ip(disassembler_t* self, uint64_t target_ip){
+@@ -628,13 +665,13 @@ void inform_disassembler_target_ip(disassembler_t* self, uint64_t target_ip){
+ 						}
+ 						obj = obj->cofi_target_ptr;
  
- 						if(!limit_check(last_obj->cofi.target_addr, obj->cofi.ins_addr, limit)){
+-						if(!obj){
+-							return false;
+-						}
+-
+-						if(!limit_check(last_obj->cofi.target_addr, obj->cofi.ins_addr, limit)){
++						//if(!limit_check(last_obj->cofi.target_addr, obj->cofi.ins_addr, limit)){
++						if (!obj || out_of_bounds(self, obj->cofi.ins_addr)) {
  							WRITE_SAMPLE_DECODED_DETAILED("2\n");
 -							return true;
 +							if (count_tnt(tnt_cache_state))
@@ -906,7 +930,7 @@ index 22c9a8b..96d0d8d 100644
  						}
  						break;
  					case NOT_TAKEN:
-@@ -648,12 +689,13 @@ void inform_disassembler_target_ip(disassembler_t* self, uint64_t target_ip){
+@@ -648,20 +685,21 @@ void inform_disassembler_target_ip(disassembler_t* self, uint64_t target_ip){
  
  						last_obj = obj;
  						/* fix if cofi_ptr is null */
@@ -922,11 +946,13 @@ index 22c9a8b..96d0d8d 100644
 +						obj = get_cofi_ptr(self, obj);
 +						//obj = obj->cofi_ptr;
  
- 						if(!obj){
- 							return false;
-@@ -661,7 +703,10 @@ void inform_disassembler_target_ip(disassembler_t* self, uint64_t target_ip){
- 
- 						if(!limit_check(last_obj->cofi.ins_addr, obj->cofi.ins_addr, limit)){
+-						if(!obj){
+-							return false;
+-						}
+-
+-						if(!limit_check(last_obj->cofi.ins_addr, obj->cofi.ins_addr, limit)){
++						//if(!limit_check(last_obj->cofi.ins_addr, obj->cofi.ins_addr, limit)){
++						if (!obj || out_of_bounds(self, obj->cofi.ins_addr)) {
  							WRITE_SAMPLE_DECODED_DETAILED("3\n");
 -							return true;
 +							if (count_tnt(tnt_cache_state))
@@ -936,9 +962,17 @@ index 22c9a8b..96d0d8d 100644
  						}
  						break;
  				}
-@@ -681,7 +726,10 @@ void inform_disassembler_target_ip(disassembler_t* self, uint64_t target_ip){
+@@ -675,13 +713,13 @@ void inform_disassembler_target_ip(disassembler_t* self, uint64_t target_ip){
+ 				}
+ 				obj = obj->cofi_target_ptr;
  
- 				if(!limit_check(last_obj->cofi.target_addr, obj->cofi.ins_addr, limit)){
+-				if(!obj){
+-					return false;
+-				}
+-
+-				if(!limit_check(last_obj->cofi.target_addr, obj->cofi.ins_addr, limit)){
++				//if(!limit_check(last_obj->cofi.target_addr, obj->cofi.ins_addr, limit)){
++				if (!obj || out_of_bounds(self, obj->cofi.ins_addr)) {
  					WRITE_SAMPLE_DECODED_DETAILED("4\n");
 -					return true;
 +					if (count_tnt(tnt_cache_state))
@@ -948,7 +982,7 @@ index 22c9a8b..96d0d8d 100644
  				}
  				break;
  
-@@ -696,7 +744,10 @@ void inform_disassembler_target_ip(disassembler_t* self, uint64_t target_ip){
+@@ -696,7 +734,10 @@ void inform_disassembler_target_ip(disassembler_t* self, uint64_t target_ip){
  #endif
  				
  				WRITE_SAMPLE_DECODED_DETAILED("(2)\t%lx\n",obj->cofi.ins_addr);
@@ -960,7 +994,7 @@ index 22c9a8b..96d0d8d 100644
  
  			case COFI_TYPE_NEAR_RET:
  #ifdef CONFIG_REDQUEEN
-@@ -706,24 +757,39 @@ void inform_disassembler_target_ip(disassembler_t* self, uint64_t target_ip){
+@@ -706,24 +747,40 @@ void inform_disassembler_target_ip(disassembler_t* self, uint64_t target_ip){
  				}
  #endif
  				WRITE_SAMPLE_DECODED_DETAILED("(3)\t%lx\n",obj->cofi.ins_addr);
@@ -988,7 +1022,8 @@ index 22c9a8b..96d0d8d 100644
 +				last_obj = obj;
 +				obj = get_cofi_ptr(self, obj);
 +
-+				if(!limit_check(last_obj->cofi.ins_addr, obj->cofi.ins_addr, limit)){
++				//if(!limit_check(last_obj->cofi.ins_addr, obj->cofi.ins_addr, limit)){
++				if (!obj || out_of_bounds(self, obj->cofi.ins_addr)) {
 +					WRITE_SAMPLE_DECODED_DETAILED("4\n");
 +					if (count_tnt(tnt_cache_state))
 +						debug_false()
@@ -1044,19 +1079,10 @@ index 7169186..efbfec2 100644
  
  int get_capstone_mode(int word_width_in_bits);
 diff --git a/pt/hypercall.c b/pt/hypercall.c
-index 842a90b..d41419d 100644
+index 842a90b..c8df229 100644
 --- a/pt/hypercall.c
 +++ b/pt/hypercall.c
-@@ -223,6 +223,8 @@ void pt_setup_payload(void* ptr){
- 
- bool handle_hypercall_kafl_next_payload(struct kvm_run *run, CPUState *cpu){
- 	if(hypercall_enabled){
-+		//debugging_code
-+		printf("KAFL_NEXT_PAYLOAD from the guest\n");
- 		if (init_state){
- 			synchronization_lock(cpu);
- 		} else {
-@@ -239,11 +241,11 @@ bool handle_hypercall_kafl_next_payload(struct kvm_run *run, CPUState *cpu){
+@@ -239,11 +239,11 @@ bool handle_hypercall_kafl_next_payload(struct kvm_run *run, CPUState *cpu){
  				for(int i = 0; i < INTEL_PT_MAX_RANGES; i++){
  					//printf("=> %d\n", i);
  					if(filter_enabled[i]){
@@ -1071,16 +1097,7 @@ index 842a90b..d41419d 100644
  					}
  				}
  			}
-@@ -292,6 +294,8 @@ void handle_hypercall_kafl_release(struct kvm_run *run, CPUState *cpu){
- 		if (init_state){
- 			init_state = false;	
- 
-+			//debugging_code
-+			printf("KAFL_PROTO_RELEASE from the guest\n");
- 			hypercall_snd_char(KAFL_PROTO_RELEASE);
- 		} else {
- 
-@@ -306,14 +310,12 @@ void handle_hypercall_kafl_cr3(struct kvm_run *run, CPUState *cpu){
+@@ -306,14 +306,12 @@ void handle_hypercall_kafl_cr3(struct kvm_run *run, CPUState *cpu){
  		QEMU_PT_PRINTF(CORE_PREFIX, "Got CR3 address:\t\t%llx", run->hypercall.args[0]);
  		pt_set_cr3(cpu, run->hypercall.args[0], false);
  
@@ -1101,7 +1118,7 @@ index 842a90b..d41419d 100644
  		}
  	}
  }
-@@ -374,19 +376,23 @@ void handle_hypercall_kafl_kasan(struct kvm_run *run, CPUState *cpu){
+@@ -374,19 +372,23 @@ void handle_hypercall_kafl_kasan(struct kvm_run *run, CPUState *cpu){
  }
  
  void handle_hypercall_kafl_lock(struct kvm_run *run, CPUState *cpu){
@@ -1127,7 +1144,7 @@ index 842a90b..d41419d 100644
  }
  
  void handle_hypercall_kafl_info(struct kvm_run *run, CPUState *cpu){
-@@ -500,7 +506,7 @@ void handle_hypercall_kafl_user_abort(struct kvm_run *run, CPUState *cpu){
+@@ -500,7 +502,7 @@ void handle_hypercall_kafl_user_abort(struct kvm_run *run, CPUState *cpu){
  #ifdef CONFIG_REDQUEEN
  bool handle_hypercall_kafl_hook(struct kvm_run *run, CPUState *cpu){
  	X86CPU *cpux86 = X86_CPU(cpu);
@@ -1136,7 +1153,7 @@ index 842a90b..d41419d 100644
  
  	for(uint8_t i = 0; i < INTEL_PT_MAX_RANGES; i++){
  		if (cpu->redqueen_state[i]){
-@@ -521,8 +527,8 @@ void pt_enable_rqi(CPUState *cpu){
+@@ -521,8 +523,8 @@ void pt_enable_rqi(CPUState *cpu){
  
  void pt_disable_rqi(CPUState *cpu){
  	cpu->redqueen_disable_pending = true;
@@ -1147,7 +1164,7 @@ index 842a90b..d41419d 100644
  
  }
  
-@@ -531,12 +537,12 @@ void pt_set_enable_patches_pending(CPUState *cpu){
+@@ -531,12 +533,12 @@ void pt_set_enable_patches_pending(CPUState *cpu){
  }
  
  void pt_set_redqueen_instrumentation_mode(CPUState *cpu, int redqueen_mode){
@@ -1164,16 +1181,17 @@ index 842a90b..d41419d 100644
  
  void pt_set_disable_patches_pending(CPUState *cpu){
 diff --git a/pt/interface.c b/pt/interface.c
-index f077be6..59f5ec3 100644
+index f077be6..e2519ed 100644
 --- a/pt/interface.c
 +++ b/pt/interface.c
-@@ -87,7 +87,10 @@ static void kafl_guest_event(void *opaque, QEMUChrEvent event){
+@@ -86,8 +86,11 @@ static void kafl_guest_event(void *opaque, QEMUChrEvent event){
+ }
  
  static void send_char(char val, void* tmp_s){
- 	kafl_mem_state *s = tmp_s;
--	qemu_chr_fe_write(&s->chr, (const uint8_t *) &val, 1);
 +        //debugging_code
 +        int res;
+ 	kafl_mem_state *s = tmp_s;
+-	qemu_chr_fe_write(&s->chr, (const uint8_t *) &val, 1);
 +	res = qemu_chr_fe_write(&s->chr, (const uint8_t *) &val, 1);
 +        printf("send char: %c, res: %d\n", val, res);
  }

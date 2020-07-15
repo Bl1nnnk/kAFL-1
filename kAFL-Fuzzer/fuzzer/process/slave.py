@@ -139,11 +139,15 @@ class SlaveProcess:
         self.statistics.event_exec()
         new_bitmap = self.q.send_payload().apply_lut()
         new_array = new_bitmap.copy_to_array()
+        #debugging_code, every payload is valid
+        return True, new_bitmap
         if new_array == old_array:
             return True, new_bitmap
 
         log_slave("Validation failed, ignoring this input", self.slave_id)
-        if False: # activate detailed logging of funky bitmaps
+        #debugging_code
+        #if False: # activate detailed logging of funky bitmaps
+        if True:
             for i in range(new_bitmap.bitmap_size):
                 if old_array[i] != new_array[i]:
                     log_slave("Funky bit in validation bitmap: %d (%d vs %d)"
