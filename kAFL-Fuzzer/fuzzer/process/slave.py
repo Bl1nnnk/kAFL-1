@@ -114,8 +114,10 @@ class SlaveProcess:
         self.conn.send_node_done(meta_data["id"], results, new_payload)
 
     def loop(self):
+        #try twice here
         if not self.q.start():
-            return
+            if not self.q.start():
+                return
 
         log_slave("Started qemu", self.slave_id)
         while True:
@@ -250,7 +252,9 @@ class SlaveProcess:
                 self.__send_to_master(data, exec_res, info)
         else:
             if crash:
-                log_slave("Crashing input found (%s), but not new (discarding)" % (exec_res.exit_reason), self.slave_id)
+                #debugging_code
+                self.__send_to_master(data, exec_res, info)
+                #log_slave("Crashing input found (%s), but not new (discarding)" % (exec_res.exit_reason), self.slave_id)
 
         # restart Qemu on crash
         if crash:

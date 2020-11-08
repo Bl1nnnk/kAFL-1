@@ -1,0 +1,479 @@
+diff --git a/pt/debug.h b/pt/debug.h
+index c17744b..ed4a607 100644
+--- a/pt/debug.h
++++ b/pt/debug.h
+@@ -30,7 +30,17 @@
+ /* _PRINTF is the standard logging enabled with -D */
+ /* _DEBUG is activated with -d kafl cmdline */
+ /* _ERROR is printed to stdout (or logged if logging is enabled) */
+-#define QEMU_PT_PRINTF(PREFIX, format, ...) qemu_log(QEMU_PT_PREFIX PREFIX format "\n", ##__VA_ARGS__)
+-#define QEMU_PT_DEBUG(PREFIX, format, ...)  qemu_log_mask(LOG_KAFL, QEMU_PT_PREFIX PREFIX format "\n", ##__VA_ARGS__)
++#define QEMU_PT_PRINTF(PREFIX, format, ...) {\
++	qemu_log("(%d)", getpid());\
++	qemu_log(QEMU_PT_PREFIX PREFIX format "\n", ##__VA_ARGS__);\
++}
++
++#define QEMU_PT_DEBUG(PREFIX, format, ...) {\
++	qemu_log_mask(LOG_KAFL, "(%d)", getpid());\
++	qemu_log_mask(LOG_KAFL, QEMU_PT_PREFIX PREFIX format "\n", ##__VA_ARGS__);\
++}
+ //#define QEMU_PT_DEBUG(PREFIX, format, ...) qemu_log_mask(LOG_KAFL, PREFIX "(%s#:%d)\t"format, __BASE_FILE__, __LINE__, ##__VA_ARGS__)
+-#define QEMU_PT_ERROR(PREFIX, format, ...)  printf(QEMU_PT_PREFIX PREFIX format "\n", ##__VA_ARGS__)
++#define QEMU_PT_ERROR(PREFIX, format, ...) {\
++	printf("(%d)", getpid());\
++	printf(QEMU_PT_PREFIX PREFIX format "\n", ##__VA_ARGS__);\
++}
+diff --git a/pt/disassembler.c b/pt/disassembler.c
+index 086d6a0..6eb6fbc 100644
+--- a/pt/disassembler.c
++++ b/pt/disassembler.c
+@@ -128,6 +128,12 @@ uint8_t lookup_table_sizes[] = {
+ 	19
+ };
+ 
++//debugging_code
++#define DDPRINT(...) {\
++	printf("(%d)", getpid());\
++	printf(__VA_ARGS__);\
++}
++
+ /* ===== kAFL disassembler cofi list ===== */
+ 
+ static cofi_list* create_list_head(void){
+@@ -386,7 +392,6 @@ static cofi_list* analyse_assembly(disassembler_t* self, uint64_t base_address,
+ 	csh handle;
+ 	cs_insn *insn;
+ 	cofi_type type;
+-	//cofi_header* tmp = NULL;
+ 	uint64_t tmp_list_element = 0;
+ 	bool last_nop = false, no_munmap = true;
+ 	uint64_t total = 0;
+@@ -397,17 +402,20 @@ static cofi_list* analyse_assembly(disassembler_t* self, uint64_t base_address,
+ 	uint64_t address = base_address;
+ 	cofi_list* predecessor = NULL;
+ 	cofi_list* first = NULL;
+-	//bool abort_disassembly = false;
+ 				
+ 	if (cs_open(CS_ARCH_X86, get_capstone_mode(self->word_width), &handle) != CS_ERR_OK)
+ 		return NULL;
+ 	
+ 	cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
+ 	insn = cs_malloc(handle);
++
++	if (self->debug) {
++		DDPRINT("base_address: %016lx\n", base_address);
++	}
+ 	
+ 	if (!code) {
+-		printf("Fatal error 1 in analyse_assembly.\n");
+-		asm("int $3\r\n");
++		DDPRINT("Fatal error 1 in analyse_assembly.\n");
++		return NULL;
+ 	}
+ 
+ 	if (across_page) {
+@@ -416,49 +424,57 @@ static cofi_list* analyse_assembly(disassembler_t* self, uint64_t base_address,
+ 		 * */
+ 		code_size = x86_64_PAGE_SIZE*2 - (address & ~x86_64_PAGE_MASK);
+ 		if (!read_virtual_memory(address, tmp_code, code_size, self->cpu)) {
+-			printf("Fatal error 2 in analyse_assembly.\n");
+-			asm("int $3\r\n");
++			DDPRINT("Fatal error 2 in analyse_assembly.\n");
++			return NULL;
+ 		}
+ 		munmap_virtual_memory((void *)code, self->cpu);
+ 		no_munmap = false;
+ 		code = tmp_code;
+ 	}
+ 
+-	while(cs_disasm_iter(handle, &code, &code_size, &address, insn)) {	
+-		if (insn->address > self->max_addr){
+-			break;
+-		}
+-			
+-		type = opcode_analyzer(self, insn);
+-		total++;
+-		
++	while(true) {
+ 		//if (self->debug){
+ 		//	printf("%lx:\t(%d)\t%s\t%s\t\t\n", insn->address, type, insn->mnemonic, insn->op_str);
+ 		//}
+ 		
+-		if (!last_nop){
++		if (!last_nop) {
+ 			if (cofi)
+ 				predecessor = self->list_element;
+ 
+ 			self->list_element = new_list_element(self->list_element);
+ 			self->list_element->cofi.type = NO_COFI_TYPE;
+-			self->list_element->cofi.ins_addr = insn->address;
+-			self->list_element->cofi.ins_size = insn->size;
+ 			self->list_element->cofi.target_addr = 0;
++			self->list_element->cofi.ins_size = 0;
++			self->list_element->cofi.ins_addr = address;
+ 
+ 			edit_cofi_ptr(predecessor, self->list_element);
+ 		}
++
++		if (!first) {
++			first = self->list_element;
++		}
++
++		if (!cs_disasm_iter(handle, &code, &code_size, &address, insn))
++			break;
++
++		self->list_element->cofi.ins_addr = insn->address;
++		self->list_element->cofi.ins_size = insn->size;
++
++		if (insn->address > self->max_addr)
++			break;
++
++		total++;
++		type = opcode_analyzer(self, insn);
++		
+ 		
+ 		if (!map_get(self, insn->address, (uint64_t *)&tmp_list_element)){
+-			if(((cofi_list *)tmp_list_element)->cofi_ptr){
++			if (((cofi_list *)tmp_list_element)->cofi_ptr) {
+ 				edit_cofi_ptr(self->list_element, (cofi_list *)tmp_list_element);
+ 				break;
+-			} else {
+-				self->list_element = (cofi_list *)tmp_list_element;
+ 			}
+ 		}
+ 		
+-		if (type != NO_COFI_TYPE){
++		if (type != NO_COFI_TYPE) {
+ 			cofi++;
+ 			last_nop = false;
+ 			self->list_element->cofi.type = type;
+@@ -482,10 +498,6 @@ static cofi_list* analyse_assembly(disassembler_t* self, uint64_t base_address,
+ 			map_put(self, insn->address, (uint64_t)(self->list_element));
+ 		}
+ 		
+-		if (!first){
+-			first = self->list_element;
+-		}
+-
+ 		//if (abort_disassembly){
+ 		//	break;
+ 		//}
+@@ -540,11 +552,8 @@ void destroy_disassembler(disassembler_t* self){
+ 	free(self);
+ }
+ 
+-static inline cofi_list* get_obj(disassembler_t* self, uint64_t entry_point, tnt_cache_t* tnt_cache_state){
++static inline cofi_list* get_obj(disassembler_t* self, uint64_t entry_point){
+ 	cofi_list *tmp_obj;
+-	//if (!count_tnt(tnt_cache_state))
+-	//	return NULL;
+-
+ 
+ 	if (out_of_bounds(self, entry_point)){
+ 		return NULL;
+@@ -558,9 +567,9 @@ static inline cofi_list* get_obj(disassembler_t* self, uint64_t entry_point, tnt
+ 		tmp_obj = analyse_assembly(self, entry_point, true);
+ 	}
+ 
+-	if (!tmp_obj->cofi_ptr) {
+-		printf("Fatal error 1 in get_obj.\n"); 
+-		asm("int $3\r\n");
++	if (!tmp_obj || !tmp_obj->cofi_ptr) {
++		DDPRINT("Fatal error 1 in get_obj.\n"); 
++		return NULL;
+ 	}
+ 
+ 	return tmp_obj;
+@@ -589,10 +598,11 @@ static inline cofi_list* get_cofi_ptr(disassembler_t* self, cofi_list *obj)
+ 
+ 	if (!obj->cofi_ptr) {
+ 		tmp_obj = analyse_assembly(self, obj->cofi.ins_addr, true);
+-		if (!tmp_obj->cofi_ptr) {
+-			printf("Fatal error 1 in get_cofi_ptr.\n");
+-			asm("int $3\r\n");
++		if (!tmp_obj || !tmp_obj->cofi_ptr) {
++			DDPRINT("Fatal error 1 in get_cofi_ptr.\n");
++			return NULL;
+ 		}
++		edit_cofi_ptr(obj, tmp_obj);
+ 	} else {
+ 		tmp_obj = obj->cofi_ptr;
+ 	}
+@@ -600,22 +610,50 @@ static inline cofi_list* get_cofi_ptr(disassembler_t* self, cofi_list *obj)
+ 	return tmp_obj;
+ }
+ 
++void print_tnt(tnt_cache_t* tnt_cache_state)
++{
++	DDPRINT("The resuilt tnts:\n");
++	while (1) {
++		switch (process_tnt_cache(tnt_cache_state)) {
++		case TNT_EMPTY:
++			return;
++		case TAKEN:
++			DDPRINT("TAKEN\n");
++			break;
++		case NOT_TAKEN:
++			DDPRINT("NOT_TAKEN\n");
++			break;
++		}
++	}
++}
++
+ #define debug_false()\
+ {\
+-	asm("int $3\r\n");\
++	DDPRINT("debug_false, entry_point %016lx\n", entry_point);\
++	self->debug = 1;\
++	print_tnt(tnt_cache_state);\
+ 	goto __ret_false;\
+ }
+  __attribute__((hot)) bool trace_disassembler(disassembler_t* self, uint64_t entry_point, uint64_t limit, tnt_cache_t* tnt_cache_state){
+ 
+-	cofi_list *obj, *last_obj;
++	cofi_list *obj, *last_obj = NULL;
+ #ifdef CONFIG_REDQUEEN
+ 	bool redqueen_tracing = (self->redqueen_mode && self->redqueen_state->trace_mode);
+ #endif
+ 	//int last_type = -1;
+-		
++	if (self->debug) {
++		DDPRINT("entry_point: %016lx\n", entry_point);
++		//asm("int $3\r\n");
++		self->debug = false;
++	}
+ 	inform_disassembler_target_ip(self, entry_point);
+ 
+-	obj = get_obj(self, entry_point, tnt_cache_state);
++	self->handler(entry_point);
++
++	if (!count_tnt(tnt_cache_state))
++		return true;
++
++	obj = get_obj(self, entry_point);
+ 
+ 	//if(!limit_check(entry_point, obj->cofi.ins_addr, limit)){
+ 	if (!obj || out_of_bounds(self, obj->cofi.ins_addr)) {
+@@ -626,15 +664,12 @@ static inline cofi_list* get_cofi_ptr(disassembler_t* self, cofi_list *obj)
+ 			return true;
+ 	}
+ 
+-	self->handler(entry_point);
+-
+ 	while(true){
+ 		
++		if (!count_tnt(tnt_cache_state))
++			return true;
+ 		if (!obj) {
+-			if (count_tnt(tnt_cache_state))
+-				debug_false()
+-			else
+-				return true;
++			debug_false();
+ 		}
+ 
+ 		switch(obj->cofi.type){
+@@ -644,7 +679,7 @@ static inline cofi_list* get_cofi_ptr(disassembler_t* self, cofi_list *obj)
+ 
+ 					case TNT_EMPTY:
+ 						WRITE_SAMPLE_DECODED_DETAILED("(%d)\t%%lx\tCACHE EMPTY\n", COFI_TYPE_CONDITIONAL_BRANCH, obj->cofi.ins_addr);
+-						return false;
++						debug_false();
+ 
+ 					case TAKEN:
+ 						WRITE_SAMPLE_DECODED_DETAILED("(%d)\t%lx\t(Taken)\n", COFI_TYPE_CONDITIONAL_BRANCH, obj->cofi.ins_addr);			
+@@ -661,17 +696,14 @@ static inline cofi_list* get_cofi_ptr(disassembler_t* self, cofi_list *obj)
+ 						last_obj = obj;
+ 						self->handler(obj->cofi.target_addr);
+ 						if(!obj->cofi_target_ptr){
+-							obj->cofi_target_ptr = get_obj(self, obj->cofi.target_addr, tnt_cache_state);
++							obj->cofi_target_ptr = get_obj(self, obj->cofi.target_addr);
+ 						}
+ 						obj = obj->cofi_target_ptr;
+ 
+ 						//if(!limit_check(last_obj->cofi.target_addr, obj->cofi.ins_addr, limit)){
+ 						if (!obj || out_of_bounds(self, obj->cofi.ins_addr)) {
+ 							WRITE_SAMPLE_DECODED_DETAILED("2\n");
+-							if (count_tnt(tnt_cache_state))
+-								debug_false()
+-							else
+-								return true;
++							debug_false();
+ 						}
+ 						break;
+ 					case NOT_TAKEN:
+@@ -696,10 +728,7 @@ static inline cofi_list* get_cofi_ptr(disassembler_t* self, cofi_list *obj)
+ 						//if(!limit_check(last_obj->cofi.ins_addr, obj->cofi.ins_addr, limit)){
+ 						if (!obj || out_of_bounds(self, obj->cofi.ins_addr)) {
+ 							WRITE_SAMPLE_DECODED_DETAILED("3\n");
+-							if (count_tnt(tnt_cache_state))
+-								debug_false()
+-							else
+-								return true;
++							debug_false();
+ 						}
+ 						break;
+ 				}
+@@ -709,17 +738,14 @@ static inline cofi_list* get_cofi_ptr(disassembler_t* self, cofi_list *obj)
+ 				WRITE_SAMPLE_DECODED_DETAILED("(%d)\t%lx\n", COFI_TYPE_UNCONDITIONAL_DIRECT_BRANCH ,obj->cofi.ins_addr);
+ 				last_obj = obj;
+ 				if(!obj->cofi_target_ptr){
+-					obj->cofi_target_ptr = get_obj(self, obj->cofi.target_addr, tnt_cache_state);
++					obj->cofi_target_ptr = get_obj(self, obj->cofi.target_addr);
+ 				}
+ 				obj = obj->cofi_target_ptr;
+ 
+ 				//if(!limit_check(last_obj->cofi.target_addr, obj->cofi.ins_addr, limit)){
+ 				if (!obj || out_of_bounds(self, obj->cofi.ins_addr)) {
+ 					WRITE_SAMPLE_DECODED_DETAILED("4\n");
+-					if (count_tnt(tnt_cache_state))
+-						debug_false()
+-					else
+-						return true;
++					debug_false();
+ 				}
+ 				break;
+ 
+@@ -734,10 +760,8 @@ static inline cofi_list* get_cofi_ptr(disassembler_t* self, cofi_list *obj)
+ #endif
+ 				
+ 				WRITE_SAMPLE_DECODED_DETAILED("(2)\t%lx\n",obj->cofi.ins_addr);
+-				if (count_tnt(tnt_cache_state))
+-					debug_false()
+-				else
+-					return true;
++				debug_false();
++				break;	
+ 
+ 			case COFI_TYPE_NEAR_RET:
+ #ifdef CONFIG_REDQUEEN
+@@ -747,10 +771,8 @@ static inline cofi_list* get_cofi_ptr(disassembler_t* self, cofi_list *obj)
+ 				}
+ #endif
+ 				WRITE_SAMPLE_DECODED_DETAILED("(3)\t%lx\n",obj->cofi.ins_addr);
+-				if (count_tnt(tnt_cache_state))
+-					debug_false()
+-				else
+-					return true;
++				debug_false();
++				break;
+ 
+ 			case COFI_TYPE_FAR_TRANSFERS:
+ 				WRITE_SAMPLE_DECODED_DETAILED("(4)\t%lx\n",obj->cofi.ins_addr);
+@@ -767,11 +789,7 @@ static inline cofi_list* get_cofi_ptr(disassembler_t* self, cofi_list *obj)
+ 				//if(!limit_check(last_obj->cofi.ins_addr, obj->cofi.ins_addr, limit)){
+ 				if (!obj || out_of_bounds(self, obj->cofi.ins_addr)) {
+ 					WRITE_SAMPLE_DECODED_DETAILED("4\n");
+-					if (count_tnt(tnt_cache_state))
+-						debug_false()
+-					else
+-						return true;
+-					return true;
++					debug_false();
+ 				}
+ 				break;
+ 			case NO_DISASSEMBLY:
+@@ -780,7 +798,6 @@ static inline cofi_list* get_cofi_ptr(disassembler_t* self, cofi_list *obj)
+ 	}
+ 
+ __ret_false:
+-	printf("Fatal error 1 in trace_disassembler.\n");
+-	//asm("int $3\r\n");
++	DDPRINT("Fatal error 1 in trace_disassembler.\n");
+ 	return false;
+ }
+diff --git a/pt/hypercall.c b/pt/hypercall.c
+index c8df229..23eb0ba 100644
+--- a/pt/hypercall.c
++++ b/pt/hypercall.c
+@@ -40,7 +40,7 @@ uint32_t hprintf_counter = 0;
+ 
+ bool create_snapshot_enabled = true;
+ bool hypercall_enabled = false;
+-void* payload_buffer = NULL;
++struct kAFL_payload *payload_buffer = NULL;
+ void* payload_buffer_guest = NULL;
+ void* program_buffer = NULL;
+ char info_buffer[INFO_SIZE];
+@@ -218,7 +218,7 @@ void pt_setup_program(void* ptr){
+ }
+ 
+ void pt_setup_payload(void* ptr){
+-	payload_buffer = ptr;
++	payload_buffer = (struct kAFL_payload *)ptr;
+ }
+ 
+ bool handle_hypercall_kafl_next_payload(struct kvm_run *run, CPUState *cpu){
+@@ -249,7 +249,7 @@ bool handle_hypercall_kafl_next_payload(struct kvm_run *run, CPUState *cpu){
+ 			}
+ 			else{
+ 				synchronization_lock(cpu);
+-				write_virtual_memory((uint64_t)payload_buffer_guest, payload_buffer, PAYLOAD_SIZE, cpu);
++				write_virtual_memory((uint64_t)payload_buffer_guest, (uint8_t *)payload_buffer, payload_buffer->size, cpu);
+ 				return true;
+ 			}
+ 		}
+@@ -273,7 +273,7 @@ void handle_hypercall_get_payload(struct kvm_run *run, CPUState *cpu){
+ 		if(payload_buffer){
+ 			QEMU_PT_PRINTF(CORE_PREFIX, "Got payload address:\t%llx", run->hypercall.args[0]);
+ 			payload_buffer_guest = (void*)run->hypercall.args[0];
+-			write_virtual_memory((uint64_t)payload_buffer_guest, payload_buffer, PAYLOAD_SIZE, cpu);
++			write_virtual_memory((uint64_t)payload_buffer_guest, (uint8_t *)payload_buffer, payload_buffer->size, cpu);
+ 		}
+ 	}
+ }
+diff --git a/pt/interface.c b/pt/interface.c
+index e2519ed..f077be6 100644
+--- a/pt/interface.c
++++ b/pt/interface.c
+@@ -86,11 +86,8 @@ static void kafl_guest_event(void *opaque, QEMUChrEvent event){
+ }
+ 
+ static void send_char(char val, void* tmp_s){
+-        //debugging_code
+-        int res;
+ 	kafl_mem_state *s = tmp_s;
+-	res = qemu_chr_fe_write(&s->chr, (const uint8_t *) &val, 1);
+-        printf("send char: %c, res: %d\n", val, res);
++	qemu_chr_fe_write(&s->chr, (const uint8_t *) &val, 1);
+ }
+ 
+ static int kafl_guest_can_receive(void * opaque){
+diff --git a/pt/interface.h b/pt/interface.h
+index 10709c6..c86c9ed 100644
+--- a/pt/interface.h
++++ b/pt/interface.h
+@@ -17,7 +17,7 @@
+ #define DEFAULT_EDGE_FILTER_SIZE	0x1000000
+ 
+ #define PROGRAM_SIZE				(128 << 20) /* 128MB Application Data */
+-#define PAYLOAD_SIZE				(128 << 10)	/* 128KB Payload Data */
++#define PAYLOAD_SIZE				(128 << 18)	/* 32MB Payload Data */
+ #define INFO_SIZE					(128 << 10)	/* 128KB Info Data */
+ #define HPRINTF_SIZE				0x1000 		/* 4KB hprintf Data */
+ 
+@@ -61,6 +61,10 @@
+ 
+ #define KAFL_PROTO_PT_ABORT				'H'
+ 
+-
++struct kAFL_payload {
++	int32_t size;
++	uint8_t data[PAYLOAD_SIZE - sizeof(int32_t) - sizeof(uint8_t)];
++	uint8_t redqueen_mode;
++} kAFL_payload;
+ 
+ #endif
+diff --git a/pt/memory_access.c b/pt/memory_access.c
+index 230e971..b0c2b70 100644
+--- a/pt/memory_access.c
++++ b/pt/memory_access.c
+@@ -215,7 +215,7 @@ void *mmap_virtual_memory(uint64_t address, CPUState *cpu)
+ 	hwaddr len = 1;
+ 	phys_addr = cpu_get_phys_page_debug(cpu, (address & x86_64_PAGE_MASK));
+ 	if (phys_addr == -1) {
+-		printf("pu_get_phys_page_debug return -1 with address of %lx\n", address);
++		QEMU_PT_PRINTF(MEM_PREFIX, "pu_get_phys_page_debug return -1 with address of %lx\n", address);
+ 		return NULL;
+ 	}
+ 

@@ -74,6 +74,7 @@ class qemu:
         self.verbose = config.argument_values['v']
 
         self.bitmap_size = config.config_values['BITMAP_SHM_SIZE']
+        self.payload_size = config.config_values['PAYLOAD_SHM_SIZE']
         self.config = config
         self.qemu_id = str(qid)
 
@@ -156,7 +157,7 @@ class qemu:
         # Lauch either as VM snapshot, direct kernel/initrd boot, or -bios boot
         if self.config.argument_values['vm_dir']:
             assert(self.config.argument_values['vm_ram'])
-            self.cmd += " -hdb " + self.config.argument_values['vm_ram']
+            self.cmd += " -hdb " + self.config.argument_values['vm_ram'] + "_" + self.qemu_id + ".qcow2"
             self.cmd += " -hda " + self.config.argument_values['vm_dir'] + "/overlay_" + self.qemu_id + ".qcow2"
             self.cmd += " -loadvm " + self.config.argument_values["S"]
         elif self.config.argument_values['kernel']:
@@ -177,7 +178,7 @@ class qemu:
             self.cmd += " -machine q35 "
             if self.config.argument_values["tp"]:
                  self.cmd = self.cmd.replace("-net none",
-                         "-netdev tap,ifname=" + get_valid_tap("tap-", int(self.qemu_id)) + ",id=net0,script=no,downscript=no -device rtl8139,netdev=net0")
+                         "-netdev tap,ifname=" + "tap-" + self.qemu_id + ",id=net0,script=no,downscript=no -device rtl8139,netdev=net0")
                  self.cmd += " -device usb-tablet -machine usb=on,type=pc,accel=kvm"
 
         if self.config.argument_values["graphic"]:
@@ -333,8 +334,6 @@ class qemu:
         while True:
             try:
                 res = self.control.recv(1)
-                #debugging_code
-                log_qemu("__debug_recv: " + str(res), self.qemu_id)
             except ConnectionResetError:
                 if self.exiting:
                     sys.exit(0)
@@ -425,7 +424,8 @@ class qemu:
         # If still alive, attempt SIGKILL or loop-wait on kill -9.
         output = "<no output received>\n"
         try:
-            self.process.terminate()
+            self.process.kill()
+            self.process.wait()
             output = strdump(self.process.communicate(timeout=1)[0], verbatim=True)
         except:
             pass
@@ -472,6 +472,10 @@ class qemu:
         except:
             pass
 
+        try:
+            self.control.close()
+        except:
+            pass
 
         return self.process.returncode
 
@@ -490,7 +494,8 @@ class qemu:
         if self.qemu_id == "0" or self.qemu_id == "1337": ## 1337 is debug instance!
             log_qemu("Launching virtual machine...CMD:\n" + ' '.join(self.cmd), self.qemu_id)
         else:
-            log_qemu("Launching virtual machine...", self.qemu_id)
+            log_qemu("Launching virtual machine...CMD:\n" + ' '.join(self.cmd), self.qemu_id)
+            #log_qemu("Launching virtual machine...", self.qemu_id)
 
         self.persistent_runs = 0
         # Have not received+send first RELEASE (init handshake)
@@ -576,11 +581,11 @@ class qemu:
         open(self.tracedump_filename, "wb").close()
 
         os.ftruncate(self.kafl_shm_f, self.bitmap_size)
-        os.ftruncate(self.fs_shm_f, (128 << 10))
+        os.ftruncate(self.fs_shm_f, self.payload_size)
 
         self.kafl_shm = mmap.mmap(self.kafl_shm_f, self.bitmap_size, mmap.MAP_SHARED, mmap.PROT_WRITE | mmap.PROT_READ)
         self.c_bitmap = (ctypes.c_uint8 * self.bitmap_size).from_buffer(self.kafl_shm)
-        self.fs_shm = mmap.mmap(self.fs_shm_f, (128 << 10), mmap.MAP_SHARED, mmap.PROT_WRITE | mmap.PROT_READ)
+        self.fs_shm = mmap.mmap(self.fs_shm_f, self.payload_size, mmap.MAP_SHARED, mmap.PROT_WRITE | mmap.PROT_READ)
 
         return True
 
@@ -617,7 +622,7 @@ class qemu:
         if timeout_detection:
             #debugging_code
             #ready = select.select([self.control], [], [], 0.25)
-            ready = select.select([self.control], [], [], 5)
+            ready = select.select([self.control], [], [], 10)
             if not ready[0]:
                 return 2
         else:
@@ -653,7 +658,6 @@ class qemu:
 
     # Wait forever on Qemu to execute the payload - useful for interactive debug
     def debug_payload(self, apply_patches=True):
-
         # TODO: do we care about this?
         if self.in_requeen:
             if apply_patches:
@@ -672,7 +676,6 @@ class qemu:
         return result
 
     def send_payload(self, apply_patches=True, timeout_detection=True, max_iterations=10):
-        log_qemu("Send payload..", self.qemu_id)
 
         if self.exiting:
             sys.exit(0)
@@ -797,8 +800,9 @@ class qemu:
 
         # TODO: enforce single global size limit through frontend/mutations/backend
         # PAYLOAD_SIZE-sizeof(uint32)-sizeof(uint8) = 131067!
-        if len(payload) > 65400:
-            payload = payload[:65400]
+        payload_limit = self.payload_size - 16
+        if len(payload) > payload_limit:
+            payload = payload[:payload_limit]
 
         try:
             self.fs_shm.seek(0)

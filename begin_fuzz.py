@@ -26,17 +26,18 @@ environments of kafl
 fuzzer = root_dir + "kAFL-1/kAFL-Fuzzer/kafl_fuzz.py"
 info = root_dir + "kAFL-1/kAFL-Fuzzer/kafl_info.py"
 
-ram_file = root_dir + "snapshots/win8_x64/ram.qcow2"
+#ram_file = root_dir + "snapshots/win8_x64/ram.qcow2"
+ram_file = root_dir + "snapshots/win8_x64/ram"
 overlay_dir = root_dir + "snapshots/win8_x64/"
 
 agent_info = root_dir + "guest_bin/info.exe"
 agent_fuzzee = root_dir + "win8/font/fuzzee/font_fuzzee.exe"
 
-seed_dir = root_dir + "win8/font/seed/"
+seed_dir = root_dir + "win8/font/corpora/"
 
 working_dir_info = root_dir + "work_dir/"
-#working_dir_fuzz = root_dir + "win8/font/work_dir/"
-working_dir_fuzz = root_dir + "work_dir/"
+working_dir_fuzz = root_dir + "win8/font/work_dir/"
+#working_dir_fuzz = root_dir + "work_dir/"
 
 base_tap = "tap-"
 ram = "2048"

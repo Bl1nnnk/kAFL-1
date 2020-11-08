@@ -37,7 +37,10 @@ win7_hdb_image = "/home/jungu/kafl/snapshots/win7_x64/ram.qcow2"
 #win8_image = work_dir + "disk/win81_x64.qcow2"
 #win8_cdrom = work_dir + "disk/Win8.1_English_x64.iso"
 win8_image = work_dir + "snapshots/win8_x64/overlay_0.qcow2"
-win8_hdb_image = work_dir + "snapshots/win8_x64/ram.qcow2"
+win8_hdb_image = work_dir + "snapshots/win8_x64/ram_0.qcow2"
+
+win8_user_image = work_dir + "snapshots/win8_x64_user/overlay_0.qcow2"
+win8_user_hdb_image = work_dir + "snapshots/win8_x64_user/ram_0.qcow2"
 
 base_tap = "tap-"
 base_shm = "sz02-shm_"
@@ -165,6 +168,11 @@ def do_start_vm(t_env, sub_stdin=subprocess.PIPE, sub_stdout=subprocess.PIPE, su
         guest_args.append(win8_hdb_image)
         guest_args.append("-hda");
         guest_args.append(win8_image);
+    elif (t_env.os == "win8_user"):
+        guest_args.append("-hdb")
+        guest_args.append(win8_user_hdb_image)
+        guest_args.append("-hda");
+        guest_args.append(win8_user_image);
         #guest_args.append("-cdrom")
         #guest_args.append(win8_cdrom)
         #guest_args.append("-boot")

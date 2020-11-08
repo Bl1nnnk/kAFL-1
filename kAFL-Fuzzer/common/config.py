@@ -98,8 +98,9 @@ def add_args_general(parser):
     parser.add_argument('-v', help='enable verbose logging to $work_dir/debug.log.',
                         action='store_true', default=False)
     parser.add_argument('-h', '--help', action='help',
-                        help='show this help message and exit'
-)
+                        help='show this help message and exit')
+    parser.add_argument('-redqueen', required=False, help='enable Redqueen trace & insertion stages',
+                        action='store_true', default=False)
 
 # kAFL/Fuzzer-specific options
 def add_args_fuzzer(parser):
@@ -118,8 +119,6 @@ def add_args_fuzzer(parser):
     parser.add_argument('-radamsa', required=False, help='enable Radamsa as additional havoc stage',
                         action='store_true', default=False)
     parser.add_argument('-grimoire', required=False, help='enable Grimoire analysis & mutation stages',
-                        action='store_true', default=False)
-    parser.add_argument('-redqueen', required=False, help='enable Redqueen trace & insertion stages',
                         action='store_true', default=False)
     parser.add_argument('-fix_hashes', required=False, help='enable Redqueen checksum fixer (broken)',
                         action='store_true', default=False)
