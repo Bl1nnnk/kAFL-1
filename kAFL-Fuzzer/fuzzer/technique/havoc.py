@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 """
-AFL-style havoc and splicing stage 
+AFL-style havoc and splicing stage
 """
 
 import glob
@@ -19,7 +19,10 @@ def load_dict(file_name):
     for line in f:
         if not line.startswith("#"):
             try:
-                dict_entries.append((line.split("=\"")[1].split("\"\n")[0]).decode("string_escape"))
+                if ("=" in line):
+                    dict_entries.append((line.split("=\"")[1].split("\"\n")[0]).decode("string_escape"))
+                else:
+                    dict_entries.append(line.encode());
             except:
                 pass
     f.close()

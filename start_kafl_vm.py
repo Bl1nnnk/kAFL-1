@@ -25,22 +25,45 @@ exec_bin = "/bin/bash"
 environments of QEMU-PT
 '''
 qemu_exec_bin = work_dir + "kAFL-1/qemu-5.0.0/x86_64-softmmu/qemu-system-x86_64"
+qemu_exec_bin_i386 = work_dir + "kAFL-1/qemu-5.0.0/i386-softmmu/qemu-system-i386"
 
-ubuntu_hdb_image = "/home/jungu/kafl/snapshots/ubuntu-16.04.4-x86_64/ram.qcow2"
-ubuntu_image = "/home/jungu/kafl/snapshots/ubuntu-16.04.4-x86_64/overlay_0.qcow2"
+kafl_ubuntu_img = {
+    "hda_image" : "/home/jungu/kafl/snapshots/ubuntu-16.04.4-x86_64/overlay_0.qcow2",
+    "hdb_image" : "/home/jungu/kafl/snapshots/ubuntu-16.04.4-x86_64/ram.qcow2"
+}
 
-#win7_image = "/home/jungu/kafl/snapshots/win7_x64/overlay_0.qcow2"
-win7_image = "/home/jungu/kafl/images/win7_x64.qcow2"
-win7_cdrom = "/home/jungu/kafl/images/7601_win7sp1_x64.iso"
-win7_hdb_image = "/home/jungu/kafl/snapshots/win7_x64/ram.qcow2"
+#win7 x86
+kafl_win7x86_img = {
+    "hda_image" : work_dir + "snapshots/win7x86_user/overlay_0.qcow2",
+    "cdrom" : "/home/da2din9o/timeplayer/disk/cn_windows_7_ultimate_x86_dvd_x15-65907.iso",
+    "hdb_image" : work_dir + "snapshots/win7x86_user/ram_0.qcow2"
+}
 
-#win8_image = work_dir + "disk/win81_x64.qcow2"
-#win8_cdrom = work_dir + "disk/Win8.1_English_x64.iso"
-win8_image = work_dir + "snapshots/win8_x64/overlay_0.qcow2"
-win8_hdb_image = work_dir + "snapshots/win8_x64/ram_0.qcow2"
+kafl_win7_img = {
+    #win7_image = "/home/jungu/kafl/snapshots/win7_x64/overlay_0.qcow2"
+    "hda_image" :  "/home/jungu/kafl/images/win7_x64.qcow2",
+    "cdrom" : "/home/jungu/kafl/images/7601_win7sp1_x64.iso",
+    "hdb_image" : "/home/jungu/kafl/snapshots/win7_x64/ram.qcow2",
+}
 
-win8_user_image = work_dir + "snapshots/win8_x64_user/overlay_0.qcow2"
-win8_user_hdb_image = work_dir + "snapshots/win8_x64_user/ram_0.qcow2"
+kafl_win8_img = {
+    #win8_image = work_dir + "disk/win81_x64.qcow2"
+    #win8_cdrom = work_dir + "disk/Win8.1_English_x64.iso"
+    "hda_image" : work_dir + "snapshots/win8_x64/overlay_0.qcow2",
+    "hdb_image" : work_dir + "snapshots/win8_x64/ram_0.qcow2"
+}
+
+kafl_win8_user_img = {
+    "hda_image" : work_dir + "snapshots/win8_x64_user/overlay_0.qcow2",
+    "hdb_image" : work_dir + "snapshots/win8_x64_user/ram_0.qcow2"
+}
+
+kafl_win10x64_img = {
+    #"hda_image" : "/home/da2din9o/timeplayer/disk/win10_x64_pre_19041.qcow2",
+    "hda_image" : work_dir + "snapshots/win10x64/overlay_0.qcow2",
+    "hdb_image" : work_dir + "snapshots/win10x64/ram_0.qcow2"
+    #"cdrom" : "/home/da2din9o/timeplayer/disk/cn_windows_7_ultimate_x86_dvd_x15-65907.iso",
+}
 
 base_tap = "tap-"
 base_shm = "sz02-shm_"
@@ -134,6 +157,25 @@ def do_start_vm(t_env, sub_stdin=subprocess.PIPE, sub_stdout=subprocess.PIPE, su
     else:
         vnc_port = str(get_valid_vnc_port(vnc_base_port) - vnc_default_port);
 
+    global qemu_exec_bin
+
+    if (t_env.os == "ubuntu"):
+        kafl_img = kafl_ubuntu_img
+    elif (t_env.os == "win7x86"):
+        kafl_img = kafl_win7x86_img
+        qemu_exec_bin = qemu_exec_bin_i386
+    elif (t_env.os == "win7"):
+        kafl_img = kafl_win7_img
+    elif (t_env.os == "win8"):
+        kafl_img = kafl_win8_img
+    elif (t_env.os == "win8_user"):
+        kafl_img = kafl_win8_user_img
+    elif (t_env.os == "win10"):
+        kafl_img = kafl_win10x64_img
+    else:
+        print "Unknow os version"
+        return;
+
     qemu_args = [qemu_exec_bin,
             #"-smp", str(t_env.smp),
             "-m", "2048",
@@ -149,37 +191,15 @@ def do_start_vm(t_env, sub_stdin=subprocess.PIPE, sub_stdout=subprocess.PIPE, su
             "-device", "usb-tablet", "-machine", "usb=on,type=pc,accel=kvm"]
 
     guest_args = list(qemu_args)
-    if (t_env.os == "ubuntu"):
-        guest_args.append("-hdb")
-        guest_args.append(ubuntu_hdb_image)
-        guest_args.append("-hda")
-        guest_args.append(ubuntu_image)
-    elif (t_env.os == "win7"):
-        guest_args.append("-hdb")
-        guest_args.append(win7_hdb_image)
-        guest_args.append("-hda");
-        guest_args.append(win7_image);
-        guest_args.append("-cdrom")
-        guest_args.append(win7_cdrom)
-        guest_args.append("-boot")
-        guest_args.append("d")
-    elif (t_env.os == "win8"):
-        guest_args.append("-hdb")
-        guest_args.append(win8_hdb_image)
-        guest_args.append("-hda");
-        guest_args.append(win8_image);
-    elif (t_env.os == "win8_user"):
-        guest_args.append("-hdb")
-        guest_args.append(win8_user_hdb_image)
-        guest_args.append("-hda");
-        guest_args.append(win8_user_image);
-        #guest_args.append("-cdrom")
-        #guest_args.append(win8_cdrom)
-        #guest_args.append("-boot")
-        #guest_args.append("d")
-    else:
-        print "Unknow os version"
-        return;
+
+    guest_args.append("-hdb")
+    guest_args.append(kafl_img["hdb_image"])
+    guest_args.append("-hda")
+    guest_args.append(kafl_img["hda_image"])
+    #guest_args.append("-cdrom")
+    #guest_args.append(win7x86_cdrom)
+    #guest_args.append("-boot")
+    #guest_args.append("d")
 
     if dp_args:
         for arg in dp_args.split():
@@ -193,7 +213,7 @@ def do_start_vm(t_env, sub_stdin=subprocess.PIPE, sub_stdout=subprocess.PIPE, su
 
 def main():
     parser = argparse.ArgumentParser(description="Differential testing for accessmenting infoleak vul", add_help=False)
-    parser.add_argument("--os", type=str, default="win8", help="win7/ubuntu")
+    parser.add_argument("--os", type=str, default="win10", help="win7/ubuntu")
     parser.add_argument("--tap", type=int, help="the serial number of tap-dev be used")
     parser.add_argument("--smp", type=int, default=4, help="the serial number of tap-dev be used")
     parser.add_argument("--vnc_port", type=int, help="vnc port of qemu")

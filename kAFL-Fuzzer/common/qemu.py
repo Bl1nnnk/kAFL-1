@@ -142,6 +142,9 @@ class qemu:
                 self.cmd += ",ip" + str(i) + "_a=" + range_a + ",ip" + str(i) + "_b=" + range_b
                 #self.cmd += ",filter" + str(i) + "=/dev/shm/kafl_filter" + str(i)
 
+        if self.config.argument_values["target_mem"]:
+            self.cmd += ",target=" + self.config.argument_values["target_mem"]
+
         if self.debug_mode:
             self.cmd += " -d kafl -D " + self.qemu_trace_log
 
@@ -595,7 +598,10 @@ class qemu:
             return True
 
         self.shutdown()
-        return self.start()
+        #try twice here
+        if not self.start():
+            return self.start()
+        return True;
 
     # Reload is not part of released Redqueen backend, it seems we can simply disable it here..
     def soft_reload(self):
@@ -620,14 +626,12 @@ class qemu:
     # TODO: document protocol and meaning/effect of each message
     def check_recv(self, timeout_detection=True):
         if timeout_detection:
-            #debugging_code
+            #debugging_code increase waiting time for debugging
             #ready = select.select([self.control], [], [], 0.25)
-            ready = select.select([self.control], [], [], 10)
+            ready = select.select([self.control], [], [], 5)
             if not ready[0]:
                 return 2
         else:
-            #debugging_code
-            #ready = select.select([self.control], [], [], 5.0)
             ready = select.select([self.control], [], [])
             if not ready[0]:
                 return 2

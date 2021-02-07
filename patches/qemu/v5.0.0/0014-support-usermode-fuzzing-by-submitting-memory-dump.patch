@@ -1,0 +1,442 @@
+From 417105a0e49bac485bd16014ecbf5218f734da35 Mon Sep 17 00:00:00 2001
+From: jungu <da2din9o@gmail.com>
+Date: Sun, 7 Feb 2021 16:35:00 +0800
+Subject: [PATCH] support usermode fuzzing by submitting memory dump
+
+---
+ include/hw/core/cpu.h |  1 +
+ pt.c                  | 24 ++++++++++++++++++++++--
+ pt.h                  |  1 +
+ pt/debug.h            |  7 +++++++
+ pt/decoder.c          |  8 ++++----
+ pt/decoder.h          |  4 ++--
+ pt/disassembler.c     | 36 +++++++-----------------------------
+ pt/disassembler.h     |  5 ++---
+ pt/interface.c        |  5 +++++
+ pt/memory_access.c    | 42 +++++++++++++++++++++++++++++++++++++++++-
+ pt/memory_access.h    |  3 ++-
+ pt/tnt_cache.c        | 18 ++++++++++++++++++
+ pt/tnt_cache.h        |  1 +
+ 13 files changed, 113 insertions(+), 42 deletions(-)
+
+diff --git a/include/hw/core/cpu.h b/include/hw/core/cpu.h
+index 5ae0ff0..8bfec6d 100644
+--- a/include/hw/core/cpu.h
++++ b/include/hw/core/cpu.h
+@@ -425,6 +425,7 @@ struct CPUState {
+     volatile bool pt_ip_filter_enabled[INTEL_PT_MAX_RANGES];
+     uint64_t pt_ip_filter_a[INTEL_PT_MAX_RANGES];
+     uint64_t pt_ip_filter_b[INTEL_PT_MAX_RANGES];
++    uint8_t* target_mem_dump[INTEL_PT_MAX_RANGES];
+     void* pt_decoder_state[INTEL_PT_MAX_RANGES];
+     uint64_t pt_c3_filter;
+ 
+diff --git a/pt.c b/pt.c
+index 869cfc5..9e3473c 100644
+--- a/pt.c
++++ b/pt.c
+@@ -33,6 +33,7 @@
+ 
+ extern uint32_t kafl_bitmap_size;
+ uint8_t* bitmap = NULL;
++uint8_t* target_mem_dump = NULL;
+ uint64_t last_ip = 0ULL;
+ 
+ void pt_sync(void){
+@@ -105,6 +106,22 @@ void pt_bitmap(uint64_t addr){
+ 	last_ip = addr; 
+ }
+ 
++void pt_setup_target_mem_dump(char *dump_file){
++	struct stat st;
++	int fd = open(dump_file, O_RDONLY);
++	if (fd <= 0) {
++		QEMU_PT_PRINTF(CORE_PREFIX, "failed to open %s\n", dump_file);
++		return;
++	}
++	fstat(fd, &st);
++	target_mem_dump = (uint8_t *)mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
++	if (target_mem_dump == MAP_FAILED) {
++		QEMU_PT_PRINTF(CORE_PREFIX, "failed to mmap for %s\n", dump_file);
++		return;
++	}
++	QEMU_PT_PRINTF(CORE_PREFIX, "Memory dump mode of TP decoder\n");
++}
++
+ void pt_dump(CPUState *cpu, int bytes){
+ 
+ #ifdef SAMPLE_RAW
+@@ -207,6 +224,9 @@ int pt_enable_ip_filtering(CPUState *cpu, uint8_t addrn, uint64_t ip_a, uint64_t
+ 	}
+ 
+ 	QEMU_PT_DEBUG(PT_PREFIX, "Configuring new trace region (addr%d, 0x%lx-0x%lx)", addrn, ip_a, ip_b);
++
++	/*todo: noly support one target_mem here*/
++	cpu->target_mem_dump[addrn] = target_mem_dump;
+ 	
+ 	switch(addrn){
+ 		case 0:
+@@ -222,9 +242,9 @@ int pt_enable_ip_filtering(CPUState *cpu, uint8_t addrn, uint64_t ip_a, uint64_t
+ 			if(redqueen && !cpu->redqueen_state[addrn]){
+ 				cpu->redqueen_state[addrn] = new_rq_state(ip_a, ip_b, cpu);
+ 			}
+-			cpu->pt_decoder_state[addrn] = pt_decoder_init(cpu, ip_a, ip_b, cpu->disassembler_word_width, &pt_bitmap, cpu->redqueen_state[addrn]);
++			cpu->pt_decoder_state[addrn] = pt_decoder_init(cpu, ip_a, ip_b, &pt_bitmap, cpu->redqueen_state[addrn]);
+ #else		
+-			cpu->pt_decoder_state[addrn] = pt_decoder_init(cpu, ip_a, ip_b, cpu->disassembler_word_width, &pt_bitmap);
++			cpu->pt_decoder_state[addrn] = pt_decoder_init(cpu, ip_a, ip_b, &pt_bitmap);
+ #endif
+ 			break;
+ 		default:
+diff --git a/pt.h b/pt.h
+index 710030c..f5de210 100644
+--- a/pt.h
++++ b/pt.h
+@@ -31,4 +31,5 @@ void pt_post_kvm_run(CPUState *cpu);
+ void pt_handle_overflow(CPUState *cpu);
+ void pt_dump(CPUState *cpu, int bytes);
+ void pt_bitmap(uint64_t addr);
++void pt_setup_target_mem_dump(char *dump_file);
+ #endif
+diff --git a/pt/debug.h b/pt/debug.h
+index ed4a607..1dc6b15 100644
+--- a/pt/debug.h
++++ b/pt/debug.h
+@@ -44,3 +44,10 @@
+ 	printf("(%d)", getpid());\
+ 	printf(QEMU_PT_PREFIX PREFIX format "\n", ##__VA_ARGS__);\
+ }
++
++//debugging_code
++#define DDPRINT(...) {\
++	printf("(%d)", getpid());\
++	printf(__VA_ARGS__);\
++}
++
+diff --git a/pt/decoder.c b/pt/decoder.c
+index 6cc7090..5cab3b2 100644
+--- a/pt/decoder.c
++++ b/pt/decoder.c
+@@ -150,9 +150,9 @@ static void flush_log(decoder_t* self){
+ #endif
+ 
+ #ifdef CONFIG_REDQUEEN
+-decoder_t* pt_decoder_init(CPUState *cpu, uint64_t min_addr, uint64_t max_addr, int disassembler_word_width, void (*handler)(uint64_t), redqueen_t *redqueen_state){
++decoder_t* pt_decoder_init(CPUState *cpu, uint64_t min_addr, uint64_t max_addr, void (*handler)(uint64_t), redqueen_t *redqueen_state){
+ #else
+-decoder_t* pt_decoder_init(CPUState *cpu, uint64_t min_addr, uint64_t max_addr, int disassembler_word_width, void (*handler)(uint64_t)){
++decoder_t* pt_decoder_init(CPUState *cpu, uint64_t min_addr, uint64_t max_addr, void (*handler)(uint64_t)){
+ #endif
+ 	decoder_t* res = malloc(sizeof(decoder_t));
+ 	res->min_addr = min_addr;
+@@ -166,9 +166,9 @@ decoder_t* pt_decoder_init(CPUState *cpu, uint64_t min_addr, uint64_t max_addr,
+ 	flush_log(res);
+ #endif
+ #ifdef CONFIG_REDQUEEN
+-	res->disassembler_state = init_disassembler(cpu, min_addr, max_addr, disassembler_word_width, handler, redqueen_state);	
++	res->disassembler_state = init_disassembler(cpu, min_addr, max_addr, handler, redqueen_state);	
+ #else
+-	res->disassembler_state = init_disassembler(cpu, min_addr, max_addr, disassembler_word_width, handler);
++	res->disassembler_state = init_disassembler(cpu, min_addr, max_addr, handler);
+ #endif
+ 	res->tnt_cache_state = tnt_cache_init();
+ 		/* ToDo: Free! */
+diff --git a/pt/decoder.h b/pt/decoder.h
+index 380eb74..0842707 100644
+--- a/pt/decoder.h
++++ b/pt/decoder.h
+@@ -87,9 +87,9 @@ typedef struct decoder_s{
+ #endif
+ } decoder_t;
+ #ifdef CONFIG_REDQUEEN
+-decoder_t* pt_decoder_init(CPUState *cpu, uint64_t min_addr, uint64_t max_addr, int disassembler_word_with,  void (*handler)(uint64_t), redqueen_t *redqueen_state);
++decoder_t* pt_decoder_init(CPUState *cpu, uint64_t min_addr, uint64_t max_addr,  void (*handler)(uint64_t), redqueen_t *redqueen_state);
+ #else
+-decoder_t* pt_decoder_init(CPUState *cpu, uint64_t min_addr, uint64_t max_addr, int disassembler_word_with, void (*handler)(uint64_t));
++decoder_t* pt_decoder_init(CPUState *cpu, uint64_t min_addr, uint64_t max_addr, void (*handler)(uint64_t));
+ #endif
+ /* returns false if the CPU trashed our tracing run ... thank you Intel btw ... */
+  __attribute__((hot)) bool decode_buffer(decoder_t* self, uint8_t* map, size_t len);
+diff --git a/pt/disassembler.c b/pt/disassembler.c
+index 6eb6fbc..85204df 100644
+--- a/pt/disassembler.c
++++ b/pt/disassembler.c
+@@ -128,12 +128,6 @@ uint8_t lookup_table_sizes[] = {
+ 	19
+ };
+ 
+-//debugging_code
+-#define DDPRINT(...) {\
+-	printf("(%d)", getpid());\
+-	printf(__VA_ARGS__);\
+-}
+-
+ /* ===== kAFL disassembler cofi list ===== */
+ 
+ static cofi_list* create_list_head(void){
+@@ -396,14 +390,15 @@ static cofi_list* analyse_assembly(disassembler_t* self, uint64_t base_address,
+ 	bool last_nop = false, no_munmap = true;
+ 	uint64_t total = 0;
+ 	uint64_t cofi = 0;
+-	const uint8_t* code = mmap_virtual_memory(base_address, self->cpu);
++	int word_width = self->cpu->disassembler_word_width;
++	const uint8_t* code = mmap_virtual_memory(base_address, word_width, self->cpu);
+ 	uint8_t tmp_code[x86_64_PAGE_SIZE*2];
+ 	size_t code_size = x86_64_PAGE_SIZE - (base_address & ~x86_64_PAGE_MASK);;
+ 	uint64_t address = base_address;
+ 	cofi_list* predecessor = NULL;
+ 	cofi_list* first = NULL;
+ 				
+-	if (cs_open(CS_ARCH_X86, get_capstone_mode(self->word_width), &handle) != CS_ERR_OK)
++	if (cs_open(CS_ARCH_X86, get_capstone_mode(word_width), &handle) != CS_ERR_OK)
+ 		return NULL;
+ 	
+ 	cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
+@@ -511,9 +506,9 @@ static cofi_list* analyse_assembly(disassembler_t* self, uint64_t base_address,
+ 	return first;
+ }
+ #ifdef CONFIG_REDQUEEN
+-disassembler_t* init_disassembler(CPUState *cpu, uint64_t min_addr, uint64_t max_addr, int disassembler_word_width, void (*handler)(uint64_t), redqueen_t *redqueen_state){
++disassembler_t* init_disassembler(CPUState *cpu, uint64_t min_addr, uint64_t max_addr, void (*handler)(uint64_t), redqueen_t *redqueen_state){
+ #else
+-disassembler_t* init_disassembler(CPUState *cpu, uint64_t min_addr, uint64_t max_addr, int disassembler_word_width, void (*handler)(uint64_t)){
++disassembler_t* init_disassembler(CPUState *cpu, uint64_t min_addr, uint64_t max_addr, void (*handler)(uint64_t)){
+ #endif
+ 	disassembler_t* res = malloc(sizeof(disassembler_t));
+ 	res->cpu = cpu;
+@@ -523,7 +518,6 @@ disassembler_t* init_disassembler(CPUState *cpu, uint64_t min_addr, uint64_t max
+ 	res->debug = false;
+ 	res->map = kh_init(ADDR0);
+ 	res->list_head = create_list_head();
+-	res->word_width = disassembler_word_width;
+ 	res->list_element = res->list_head;
+ 	res->has_pending_indirect_branch = false;
+ 	res->pending_indirect_branch_src = 0;
+@@ -610,23 +604,6 @@ static inline cofi_list* get_cofi_ptr(disassembler_t* self, cofi_list *obj)
+ 	return tmp_obj;
+ }
+ 
+-void print_tnt(tnt_cache_t* tnt_cache_state)
+-{
+-	DDPRINT("The resuilt tnts:\n");
+-	while (1) {
+-		switch (process_tnt_cache(tnt_cache_state)) {
+-		case TNT_EMPTY:
+-			return;
+-		case TAKEN:
+-			DDPRINT("TAKEN\n");
+-			break;
+-		case NOT_TAKEN:
+-			DDPRINT("NOT_TAKEN\n");
+-			break;
+-		}
+-	}
+-}
+-
+ #define debug_false()\
+ {\
+ 	DDPRINT("debug_false, entry_point %016lx\n", entry_point);\
+@@ -642,7 +619,8 @@ void print_tnt(tnt_cache_t* tnt_cache_state)
+ #endif
+ 	//int last_type = -1;
+ 	if (self->debug) {
+-		DDPRINT("entry_point: %016lx\n", entry_point);
++		DDPRINT("entry_point: %016lx,\t", entry_point);
++		DDPRINT("tnt count: %d\n", count_tnt(tnt_cache_state));
+ 		//asm("int $3\r\n");
+ 		self->debug = false;
+ 	}
+diff --git a/pt/disassembler.h b/pt/disassembler.h
+index efbfec2..37f6445 100644
+--- a/pt/disassembler.h
++++ b/pt/disassembler.h
+@@ -73,7 +73,6 @@ typedef struct disassembler_s{
+ 	cofi_list* list_element;
+ 	bool debug;
+ 	bool has_pending_indirect_branch;
+-	int word_width;
+ 	uint64_t pending_indirect_branch_src;
+ #ifdef CONFIG_REDQUEEN
+ 	bool redqueen_mode;
+@@ -82,9 +81,9 @@ typedef struct disassembler_s{
+ } disassembler_t;
+ 
+ #ifdef CONFIG_REDQUEEN
+-disassembler_t* init_disassembler(CPUState *cpu, uint64_t min_addr, uint64_t max_addr, int disassembler_word_width, void (*handler)(uint64_t), redqueen_t *redqueen_state);
++disassembler_t* init_disassembler(CPUState *cpu, uint64_t min_addr, uint64_t max_addr, void (*handler)(uint64_t), redqueen_t *redqueen_state);
+ #else
+-disassembler_t* init_disassembler(CPUState *cpu, uint64_t min_addr, uint64_t max_addr, int disassembler_word_width, void (*handler)(uint64_t));
++disassembler_t* init_disassembler(CPUState *cpu, uint64_t min_addr, uint64_t max_addr, void (*handler)(uint64_t));
+ #endif
+ 
+ int get_capstone_mode(int word_width_in_bits);
+diff --git a/pt/interface.c b/pt/interface.c
+index f077be6..432c8dd 100644
+--- a/pt/interface.c
++++ b/pt/interface.c
+@@ -64,6 +64,8 @@ typedef struct kafl_mem_state {
+ 	char* data_bar_fd_2;
+ 	char* bitmap_file;
+ 
++	char* target_dump_file;
++
+ 	char* filter_bitmap[4];
+ 	char* ip_filter[4][2];
+ 
+@@ -294,6 +296,8 @@ static void pci_kafl_guest_realize(DeviceState *dev, Error **errp){
+ 	if(s->bitmap_file)
+ 		kafl_guest_setup_bitmap(s, kafl_bitmap_size, errp);
+ 
++	pt_setup_target_mem_dump(s->target_dump_file);
++
+ 	for(uint8_t i = 0; i < INTEL_PT_MAX_RANGES; i++){
+ 		if(s->ip_filter[i][0] && s->ip_filter[i][1]){
+ 			tmp0 = CONVERT_UINT64(s->ip_filter[i][0]);
+@@ -342,6 +346,7 @@ static Property kafl_guest_properties[] = {
+ 	DEFINE_PROP_STRING("shm0", kafl_mem_state, data_bar_fd_0),
+ 	DEFINE_PROP_STRING("shm1", kafl_mem_state, data_bar_fd_1),
+ 	DEFINE_PROP_STRING("bitmap", kafl_mem_state, bitmap_file),
++	DEFINE_PROP_STRING("target", kafl_mem_state, target_dump_file),
+ 	DEFINE_PROP_STRING("filter0", kafl_mem_state, filter_bitmap[0]),
+ 	DEFINE_PROP_STRING("filter1", kafl_mem_state, filter_bitmap[1]),
+ 	DEFINE_PROP_STRING("filter2", kafl_mem_state, filter_bitmap[2]),
+diff --git a/pt/memory_access.c b/pt/memory_access.c
+index b0c2b70..df5cff0 100644
+--- a/pt/memory_access.c
++++ b/pt/memory_access.c
+@@ -11,6 +11,24 @@
+ #include "hypercall.h"
+ #include "debug.h"
+ 
++void *target_addr_in_dump(uint64_t address, CPUState *cpu)
++{
++	int i;
++	uint64_t off;
++
++	for (i=0; i<INTEL_PT_MAX_RANGES; i++) {
++		if (address >= cpu->pt_ip_filter_a[i] && address < cpu->pt_ip_filter_b[i]) {
++			if (cpu->target_mem_dump[i]) {
++				off = address - cpu->pt_ip_filter_a[i];
++				return cpu->target_mem_dump[i] + off;
++			}
++		}
++	}
++
++	return NULL;
++
++}
++
+ bool read_virtual_memory(uint64_t address, uint8_t* data, uint32_t size, CPUState *cpu){
+ 	uint8_t tmp_buf[x86_64_PAGE_SIZE];
+ 	MemTxAttrs attrs;
+@@ -18,6 +36,11 @@ bool read_virtual_memory(uint64_t address, uint8_t* data, uint32_t size, CPUStat
+ 	int asidx;
+ 	bool ret = true;
+ 	uint64_t amount_copied = 0;
++
++	if (target_addr_in_dump(address, cpu) && target_addr_in_dump(address+size, cpu)) {
++		memcpy(data, target_addr_in_dump(address, cpu), size);
++		return true;
++	}
+ 	
+ 	//cpu_synchronize_state(cpu);
+ 	kvm_cpu_synchronize_state(cpu);
+@@ -209,10 +232,19 @@ bool write_virtual_shadow_memory(uint64_t address, uint8_t* data, uint32_t size,
+ }
+ 
+ /* Mmap guest virtual address to host address with size of 1 */
+-void *mmap_virtual_memory(uint64_t address, CPUState *cpu)
++void *mmap_virtual_memory(uint64_t address, int word_width, CPUState *cpu)
+ {
+ 	hwaddr phys_addr;
+ 	hwaddr len = 1;
++	void *ret_addr;
++
++	ret_addr = target_addr_in_dump(address, cpu);
++	if (ret_addr) {
++		return ret_addr;
++	}
++
++	//cpu_synchronize_state(cpu);
++	kvm_cpu_synchronize_state(cpu);
+ 	phys_addr = cpu_get_phys_page_debug(cpu, (address & x86_64_PAGE_MASK));
+ 	if (phys_addr == -1) {
+ 		QEMU_PT_PRINTF(MEM_PREFIX, "pu_get_phys_page_debug return -1 with address of %lx\n", address);
+@@ -224,5 +256,13 @@ void *mmap_virtual_memory(uint64_t address, CPUState *cpu)
+ 
+ void munmap_virtual_memory(void *buffer, CPUState *cpu)
+ {
++	int i;
++	uint64_t ip_range;
++	for (i=0; i<INTEL_PT_MAX_RANGES; i++) {
++		ip_range = cpu->pt_ip_filter_b[i] - cpu->pt_ip_filter_a[i];
++		if ((uint8_t *)buffer >= cpu->target_mem_dump[i] && (uint8_t *)buffer < cpu->target_mem_dump[i]+ip_range) {
++			return;
++		}
++	}
+ 	cpu_physical_memory_unmap(buffer, 1, false, 1);
+ }
+diff --git a/pt/memory_access.h b/pt/memory_access.h
+index e485f37..9050a7d 100644
+--- a/pt/memory_access.h
++++ b/pt/memory_access.h
+@@ -19,11 +19,12 @@
+ #define x86_64_PAGE_SIZE	0x1000
+ #define x86_64_PAGE_MASK	~(x86_64_PAGE_SIZE - 1)
+ 
++void *target_addr_in_dump(uint64_t address, CPUState *cpu);
+ bool read_virtual_memory(uint64_t address, uint8_t* data, uint32_t size, CPUState *cpu);
+ bool write_virtual_memory(uint64_t address, uint8_t* data, uint32_t size, CPUState *cpu);
+ void hexdump_virtual_memory(uint64_t address, uint32_t size, CPUState *cpu);
+ bool write_virtual_shadow_memory(uint64_t address, uint8_t* data, uint32_t size, CPUState *cpu);
+ bool is_addr_mapped(uint64_t address, CPUState *cpu);
+-void *mmap_virtual_memory(uint64_t address, CPUState *cpu);
++void *mmap_virtual_memory(uint64_t address, int word_width, CPUState *cpu);
+ void munmap_virtual_memory(void *buffer, CPUState *cpu);
+ #endif
+diff --git a/pt/tnt_cache.c b/pt/tnt_cache.c
+index a278516..1ae4ad8 100644
+--- a/pt/tnt_cache.c
++++ b/pt/tnt_cache.c
+@@ -7,6 +7,7 @@
+  * SPDX-License-Identifier: GPL-2.0-or-later
+  */
+ 
++#include "debug.h"
+ #include "tnt_cache.h"
+ #include <assert.h>
+ #include <sys/mman.h>
+@@ -80,3 +81,20 @@ void tnt_cache_destroy(tnt_cache_t* self){
+ 	self->tnt = 0;
+ }
+ 
++void print_tnt(tnt_cache_t* tnt_cache_state)
++{
++	DDPRINT("The resuilt tnts:\n");
++	while (1) {
++		switch (process_tnt_cache(tnt_cache_state)) {
++		case TNT_EMPTY:
++			return;
++		case TAKEN:
++			DDPRINT("TAKEN\n");
++			break;
++		case NOT_TAKEN:
++			DDPRINT("NOT_TAKEN\n");
++			break;
++		}
++	}
++}
++
+diff --git a/pt/tnt_cache.h b/pt/tnt_cache.h
+index 38214c8..4cc1552 100644
+--- a/pt/tnt_cache.h
++++ b/pt/tnt_cache.h
+@@ -46,4 +46,5 @@ uint8_t process_tnt_cache(tnt_cache_t* self);
+ void append_tnt_cache(tnt_cache_t* self, uint8_t data);
+ void append_tnt_cache_ltnt(tnt_cache_t* self, uint64_t data);
+ 
++void print_tnt(tnt_cache_t* tnt_cache_state);
+ #endif
+-- 
+2.7.4
+

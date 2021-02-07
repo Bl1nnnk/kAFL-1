@@ -26,25 +26,16 @@ environments of kafl
 fuzzer = root_dir + "kAFL-1/kAFL-Fuzzer/kafl_fuzz.py"
 info = root_dir + "kAFL-1/kAFL-Fuzzer/kafl_info.py"
 
-kafl_win8_img = {
-    #ram_file = root_dir + "snapshots/win8_x64/ram.qcow2"
-    "ram_file" : root_dir + "snapshots/win8_x64/ram",
-    "overlay_dir" : root_dir + "snapshots/win8_x64/",
-    "agent_fuzzee" : root_dir + "win8/font/fuzzee/font_fuzzee.exe",
-    "working_dir_info" : root_dir + "work_dir/",
-    "working_dir_fuzz" : root_dir + "win8/font/work_dir/",
+#arguments for win7x86
+kafl_win7x86_env = {
+    "ram_file" : root_dir + "snapshots/win7x86_user/ram",
+    "overlay_dir" : root_dir + "snapshots/win7x86_user/",
     "agent_info" : root_dir + "guest_bin/info.exe",
-    "seed_dir" : root_dir + "win8/font/corpora/"
-}
-
-kafl_win10x64_img = {
-    "ram_file" : root_dir + "snapshots/win10x64/ram",
-    "overlay_dir" : root_dir + "snapshots/win10x64/",
-    "agent_fuzzee" : root_dir + "win10/font/fuzzee/font_fuzzee.exe",
-    "working_dir_info" : root_dir + "win10/font/work_dir/",
-    "working_dir_fuzz" : root_dir + "win10/font/work_dir/",
-    "agent_info" : root_dir + "guest_bin/info_dll.exe",
-    "seed_dir" : root_dir + "win10/font/corpora/",
+    "agent_fuzzee" : root_dir + "win7x86/user/timwp/agent/KAFL_User_Agent.exe",
+    "seed_dir" : root_dir + "win7x86/user/timwp/corpora/",
+    "dict_file" : root_dir+"win7x86/user/timwp/dict/dicts.txt",
+    "working_dir_info" : root_dir + "win7x86/user/timwp/work_dir/",
+    "working_dir_fuzz" : root_dir + "win7x86/user/timwp/work_dir/"
 }
 
 base_tap = "tap-"
@@ -108,35 +99,32 @@ def do_fuzz(t_env, sub_stdin=subprocess.PIPE, sub_stdout=subprocess.PIPE, sub_st
     else:
         tap_dev = get_valid_tap(base_tap)
 
-    if (t_env.os == "win8"):
-        kafl_img = kafl_win8_img
-    elif (t_env.os == "win10x64"):
-        kafl_img = kafl_win10x64_img
-    else:
-        print("Unkonwn system")
-        return None;
-
     kafl_args = []
     if t_env.info:
+        agent = agent_info
         exec_bin = info
-        agent = kafl_img["agent_info"]
-        working_dir = kafl_img["working_dir_info"]
+        working_dir = working_dir_info
     else:
         exec_bin = fuzzer
-        agent = kafl_img["agent_fuzzee"]
-        working_dir = kafl_img["working_dir_fuzz"]
+        agent = agent_fuzzee
+
+    if (t_env.os == "win7x86"):
+        kafl_env = kafl_win7x86_env
+    else:
+        kafl_env = kafl_win7x86_env
 
     kafl_args = [
             exec_bin,
-            "-vm_ram", kafl_img["ram_file"],
-            "-vm_dir", kafl_img["overlay_dir"],
-            "-work_dir", working_dir,
-            "-agent", agent,
+            "-vm_ram", kafl_env["ram_file"],
+            "-vm_dir", kafl_env["overlay_dir"],
+            "-work_dir", kafl_env["working_dir_fuzz"],
+            "-agent", kafl_env["agent_fuzzee"],
             "-mem", "2048",
             ]
 
     if not t_env.info:
-        kafl_args += ["-seed_dir", kafl_img["seed_dir"]]
+        kafl_args += ["-seed_dir", kafl_env["seed_dir"]]
+        kafl_args += ["-dict", kafl_env["dict_file"]]
 
     kafl_args.append("-tp")
     if t_env.args:
@@ -147,19 +135,24 @@ def do_fuzz(t_env, sub_stdin=subprocess.PIPE, sub_stdout=subprocess.PIPE, sub_st
 
 def main():
     parser = argparse.ArgumentParser(description="Wrapper for kafl in timeplayer environment", add_help=False)
-    parser.add_argument("--os", type=str, default="win10x64", help="win7/ubuntu")
-    parser.add_argument("--info", action='store_true', default=False, help="Verbose debug information")
+    parser.add_argument("--os", type=str, default="win7x86", help="win7/ubuntu")
     parser.add_argument("--args", type=str, help="Extra arguments of kafl")
     parser.add_argument("--tap", type=int, help="the serial number of tap-dev be used")
+    parser.add_argument("--info", action='store_true', default=False, help="Verbose debug information")
 
     t_env = parser.parse_args()
 
-    r_instance = do_fuzz(t_env, None, None, None);
-    r_instance.wait()
+    try:
+        r_instance = do_fuzz(t_env, None, None, None);
+        r_instance.wait()
+    except KeyboardInterrupt:
+        print("Received Ctrl-C, waiting for master...")
+    finally:
+        r_instance.wait()
+
     return
 
 
 if __name__ == "__main__":
     main()
-    #print get_valid_pal_order(base_shm)
 

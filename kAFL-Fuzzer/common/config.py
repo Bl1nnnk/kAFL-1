@@ -153,6 +153,9 @@ def add_args_qemu(parser):
     parser.add_argument('-mem', metavar='<num>', help='size of virtual memory in MB (default: 256).',
                         default=256, type=int)
 
+    parser.add_argument('-target_mem', required=False, metavar='<file>', type=parse_is_file,
+                        help='target memory dump file')
+
     parser.add_argument('-ip0', required=False, metavar='<start-end>', type=parse_range_ip_filter,
                         help='set IP trace filter range')
     #parser.add_argument('-ip1', required=False, metavar='<start-end>', type=parse_range_ip_filter,
